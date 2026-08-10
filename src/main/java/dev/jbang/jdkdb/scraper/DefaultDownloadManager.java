@@ -38,7 +38,6 @@ public class DefaultDownloadManager implements DownloadManager {
 	private final ConcurrentHashMap<String, AtomicInteger> submittedPerDistro;
 	private final ConcurrentHashMap<String, AtomicInteger> completedPerDistro;
 	private final ConcurrentHashMap<String, AtomicInteger> failedPerDistro;
-
 	private static final Logger logger = LoggerFactory.getLogger(DefaultDownloadManager.class);
 
 	/**
@@ -308,6 +307,7 @@ public class DefaultDownloadManager implements DownloadManager {
 		JdkMetadata metadata = task.metadata;
 		String filename = metadata.getFilename();
 		String url = metadata.getUrl();
+		Optional<String> unlistedSince = findUnlistedSince(metadata);
 
 		if (filename == null || url == null) {
 			return;
@@ -321,8 +321,27 @@ public class DefaultDownloadManager implements DownloadManager {
 		Path tempFile = Files.createTempFile("jdk-metadata-", "-" + filename);
 
 		try {
+			if (unlistedSince.isPresent()) {
+				task.downloadLogger()
+						.info(
+								"Metadata item {} has unlisted_since={} - attempting download",
+								filename,
+								unlistedSince.get());
+			}
 			task.downloadLogger().info("Downloading " + filename);
-			httpUtils.downloadFile(url, tempFile);
+			try {
+				httpUtils.downloadFile(url, tempFile);
+			} catch (IOException e) {
+				if (unlistedSince.isPresent() && isHttp404(e)) {
+					task.downloadLogger()
+							.warn(
+									"Download returned 404 for unlisted package {} (unlisted_since={}). "
+											+ "This package is most likely not available anymore and is a candidate for pruning.",
+									filename,
+									unlistedSince.get());
+				}
+				throw e;
+			}
 
 			long size = Files.size(tempFile);
 
@@ -389,6 +408,26 @@ public class DefaultDownloadManager implements DownloadManager {
 			throws IOException {
 		Path checksumFile = checksumDir.resolve(filename + "." + algorithm);
 		Files.writeString(checksumFile, checksum + "  " + filename + "\n");
+	}
+
+	private Optional<String> findUnlistedSince(JdkMetadata metadata) {
+		String value = metadata.getUnlistedSince();
+		if (value == null || value.isBlank()) {
+			return Optional.empty();
+		}
+		return Optional.of(value);
+	}
+
+	private boolean isHttp404(IOException exception) {
+		Throwable current = exception;
+		while (current != null) {
+			String message = current.getMessage();
+			if (message != null && message.contains("HTTP status: 404")) {
+				return true;
+			}
+			current = current.getCause();
+		}
+		return false;
 	}
 
 	/**
