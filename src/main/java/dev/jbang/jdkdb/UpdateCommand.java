@@ -11,10 +11,10 @@ import dev.jbang.jdkdb.util.MetadataUtils;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -22,7 +22,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.concurrent.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,12 +47,6 @@ public class UpdateCommand implements Callable<Integer> {
 			description = "Directory to store checksum files (default: db/checksums)",
 			defaultValue = "db/checksums")
 	private Path checksumDir;
-
-	@Option(
-			names = {"-p", "--prune-dir"},
-			description =
-					"Move prunable metadata and checksum files to this directory (retaining distro subfolder structure)")
-	private Path pruneDir;
 
 	@Option(
 			names = {"-s", "--scrapers"},
@@ -95,6 +88,12 @@ public class UpdateCommand implements Callable<Integer> {
 			description = "Maximum total number of downloads to accept before stopping (default: unlimited)",
 			defaultValue = "-1")
 	private int limitTotal;
+
+	@Option(
+			names = {"--mark-unlisted"},
+			description =
+					"Mark metadata files that were not listed in the current full successful distro scan by adding unlisted_since")
+	private boolean markUnlisted;
 
 	@Option(
 			names = {"--skip-ea"},
@@ -294,7 +293,9 @@ public class UpdateCommand implements Callable<Integer> {
 			logger.info("");
 			logger.info("All scrapers completed in {} seconds", duration);
 
-			pruneOldMetadata(results, allDiscoveries, scrapers);
+			if (markUnlisted) {
+				markUnlistedMetadata(results, allDiscoveries, scrapers);
+			}
 
 			return successful > 0 ? 0 : 1;
 		}
@@ -381,133 +382,173 @@ public class UpdateCommand implements Callable<Integer> {
 		logger.info("Total: {} scrapers", names.size());
 	}
 
-	private void pruneOldMetadata(
+	void markUnlistedMetadata(
 			Map<String, ScraperResult> results,
 			Map<String, Scraper.Discovery> allDiscoveries,
 			Map<String, Scraper> scrapers) {
-		// 1. Collect all local metadata file paths (exclude index files)
-		var candidatePaths = new HashSet<Path>();
-		try (var pathStream = Files.walk(metadataDir, 2)) {
-			pathStream
+		var eligibleDistros = findDistrosEligibleForUnlistedTreatment(results, allDiscoveries, scrapers);
+		logger.info("");
+		logger.info("Unlisted Marking");
+		logger.info("===============");
+		logger.info("Overview of unlisted metadata files");
+		if (eligibleDistros.isEmpty()) {
+			logger.info("No distros were eligible for unlisted marking.");
+			logger.info("A distro is eligible only when all its scrapers ran and completed without errors.");
+			return;
+		}
+
+		LocalDate markDate = LocalDate.now();
+		int totalMarked = 0;
+		int totalRelisted = 0;
+
+		logger.info("Mark date: {}", markDate);
+
+		for (var distro : eligibleDistros) {
+			var listedPaths = collectListedMetadataPathsForDistro(distro, results, allDiscoveries);
+			UnlistedUpdateSummary distroSummary = markUnlistedMetadataForDistro(distro, listedPaths, markDate);
+			int distroMarked = distroSummary.marked();
+			int distroRelisted = distroSummary.relisted();
+			totalMarked += distroMarked;
+			totalRelisted += distroRelisted;
+			logger.info(
+					"  {}: {} file(s) marked as unlisted, {} file(s) restored from unlisted",
+					distro,
+					distroMarked,
+					distroRelisted);
+		}
+
+		logger.info("Total marked as unlisted: {}", totalMarked);
+		logger.info("Total restored from unlisted: {}", totalRelisted);
+	}
+
+	record UnlistedUpdateSummary(int marked, int relisted) {}
+
+	Set<String> findDistrosEligibleForUnlistedTreatment(
+			Map<String, ScraperResult> results,
+			Map<String, Scraper.Discovery> allDiscoveries,
+			Map<String, Scraper> scrapers) {
+		var scrapersByDistro = new HashMap<String, Set<String>>();
+		for (var entry : allDiscoveries.entrySet()) {
+			scrapersByDistro
+					.computeIfAbsent(entry.getValue().distro(), ignored -> new HashSet<>())
+					.add(entry.getKey());
+		}
+
+		var eligibleDistros = new HashSet<String>();
+		for (var entry : scrapersByDistro.entrySet()) {
+			var distro = entry.getKey();
+			var distroScrapers = entry.getValue();
+
+			boolean allRan = distroScrapers.stream().allMatch(scrapers::containsKey);
+			if (!allRan) {
+				continue;
+			}
+
+			boolean allSuccessful = distroScrapers.stream().allMatch(scraperId -> {
+				var result = results.get(scraperId);
+				return result != null
+						&& result.success()
+						&& result.itemsFailed() == 0
+						&& !result.allMetadata().isEmpty();
+			});
+
+			if (allSuccessful) {
+				eligibleDistros.add(distro);
+			}
+		}
+
+		return eligibleDistros;
+	}
+
+	private Set<Path> collectListedMetadataPathsForDistro(
+			String distro, Map<String, ScraperResult> results, Map<String, Scraper.Discovery> allDiscoveries) {
+		var listedPaths = new HashSet<Path>();
+		for (var entry : results.entrySet()) {
+			var discovery = allDiscoveries.get(entry.getKey());
+			if (discovery == null || !distro.equals(discovery.distro())) {
+				continue;
+			}
+
+			for (var metadata : entry.getValue().allMetadata()) {
+				Path metadataFile = metadata.metadataFile();
+				if (metadataFile == null) {
+					continue;
+				}
+				listedPaths.add(metadataDir
+						.resolve(distro)
+						.resolve(metadataFile)
+						.toAbsolutePath()
+						.normalize());
+			}
+		}
+		return listedPaths;
+	}
+
+	UnlistedUpdateSummary markUnlistedMetadataForDistro(String distro, Set<Path> listedPaths, LocalDate markDate) {
+		Path distroDir = metadataDir.resolve(distro);
+		if (!Files.exists(distroDir) || !Files.isDirectory(distroDir)) {
+			return new UnlistedUpdateSummary(0, 0);
+		}
+
+		int marked = 0;
+		int relisted = 0;
+		try (var pathStream = Files.list(distroDir)) {
+			var metadataFiles = pathStream
 					.filter(Files::isRegularFile)
 					.filter(p -> p.getFileName().toString().endsWith(".json"))
 					.filter(p -> !p.getFileName().toString().equals("all.json"))
 					.filter(p -> !p.getFileName().toString().equals("latest.json"))
 					.map(p -> p.toAbsolutePath().normalize())
-					.forEach(candidatePaths::add);
-		} catch (IOException e) {
-			logger.error("Failed to collect metadata files for pruning: {}", e.getMessage(), e);
-			return;
-		}
+					.toList();
 
-		// 2. Build protected-distro set: scrapers not scheduled to run, or that failed / returned empty results
-		var protectedDistros = new HashSet<String>();
-		for (var entry : allDiscoveries.entrySet()) {
-			if (!scrapers.containsKey(entry.getKey())) {
-				protectedDistros.add(entry.getValue().distro());
-			}
-		}
-		for (var entry : results.entrySet()) {
-			var result = entry.getValue();
-			var discovery = allDiscoveries.get(entry.getKey());
-			if (discovery == null) continue;
-			if (!result.success() || result.allMetadata().isEmpty()) {
-				protectedDistros.add(discovery.distro());
-			}
-		}
-
-		// 3. Remove files belonging to protected distros from candidates
-		candidatePaths.removeIf(p -> {
-			var parent = p.getParent();
-			return parent != null
-					&& protectedDistros.contains(parent.getFileName().toString());
-		});
-
-		// 4. Remove known-good files (still publicly listed by a successful scraper)
-		for (var entry : results.entrySet()) {
-			var result = entry.getValue();
-			if (!result.success() || result.allMetadata().isEmpty()) continue;
-			var discovery = allDiscoveries.get(entry.getKey());
-			if (discovery == null) continue;
-			String distro = discovery.distro();
-			for (var metadata : result.allMetadata()) {
-				Path expectedPath = metadataDir
-						.resolve(distro)
-						.resolve(metadata.metadataFile())
-						.toAbsolutePath()
-						.normalize();
-				candidatePaths.remove(expectedPath);
-			}
-		}
-
-		// 5. Log summary
-		var byDistro = new TreeMap<String, List<Path>>();
-		for (var path : candidatePaths) {
-			String distro = path.getParent().getFileName().toString();
-			byDistro.computeIfAbsent(distro, k -> new ArrayList<>()).add(path);
-		}
-
-		logger.info("");
-		logger.info("Prunable Metadata Files");
-		logger.info("=======================");
-		if (candidatePaths.isEmpty()) {
-			logger.info("No prunable metadata files found.");
-			return;
-		}
-		logger.info("Total prunable files: {}", candidatePaths.size());
-		for (var entry : byDistro.entrySet()) {
-			logger.info("  {}: {} file(s)", entry.getKey(), entry.getValue().size());
-		}
-
-		// 6. Move files if --prune-dir was specified
-		if (pruneDir != null) {
-			logger.info("Moving prunable files to: {}", pruneDir.toAbsolutePath());
-			int moved = 0;
-			int errors = 0;
-			for (var entry : byDistro.entrySet()) {
-				String distro = entry.getKey();
-				Path targetDistroDir = pruneDir.resolve(distro);
-				try {
-					Files.createDirectories(targetDistroDir);
-				} catch (IOException e) {
-					logger.error("Failed to create prune directory {}: {}", targetDistroDir, e.getMessage());
-					errors++;
+			for (var metadataPath : metadataFiles) {
+				if (listedPaths.contains(metadataPath)) {
+					if (removeUnlistedMarkerFromMetadataFile(metadataPath)) {
+						relisted++;
+					}
 					continue;
 				}
-				for (var srcJson : entry.getValue()) {
-					// Move the .json metadata file
-					Path targetJson = targetDistroDir.resolve(srcJson.getFileName());
-					try {
-						Files.move(srcJson, targetJson, StandardCopyOption.REPLACE_EXISTING);
-						moved++;
-					} catch (IOException e) {
-						logger.error("Failed to move {}: {}", srcJson, e.getMessage());
-						errors++;
-						continue;
-					}
-					// Move corresponding checksum files alongside the json
-					String baseName = srcJson.getFileName().toString();
-					baseName = baseName.substring(0, baseName.length() - 5); // strip ".json"
-					for (var ext : List.of(".md5", ".sha1", ".sha256", ".sha512")) {
-						Path srcChecksum = checksumDir.resolve(distro).resolve(baseName + ext);
-						if (Files.exists(srcChecksum)) {
-							Path targetChecksum = targetDistroDir.resolve(baseName + ext);
-							try {
-								Files.move(srcChecksum, targetChecksum, StandardCopyOption.REPLACE_EXISTING);
-							} catch (IOException e) {
-								logger.error("Failed to move checksum file {}: {}", srcChecksum, e.getMessage());
-								errors++;
-							}
-						}
-					}
+
+				if (markMetadataFileAsUnlisted(metadataPath, markDate)) {
+					marked++;
 				}
 			}
-			logger.info("Moved {} metadata file(s) to {}", moved, pruneDir.toAbsolutePath());
-			if (errors > 0) {
-				logger.warn("{} error(s) occurred during pruning", errors);
+		} catch (IOException e) {
+			logger.error("Failed to mark unlisted metadata for distro {}: {}", distro, e.getMessage(), e);
+		}
+
+		return new UnlistedUpdateSummary(marked, relisted);
+	}
+
+	private boolean markMetadataFileAsUnlisted(Path metadataFile, LocalDate markDate) {
+		try {
+			JdkMetadata metadata = MetadataUtils.readMetadataFile(metadataFile);
+			if (metadata.getUnlistedSince() != null
+					&& !metadata.getUnlistedSince().isBlank()) {
+				return false;
 			}
-		} else {
-			logger.info("Use --prune-dir to move prunable files to a separate directory.");
+			metadata.setUnlistedSince(markDate.toString());
+			MetadataUtils.saveMetadataFile(metadataFile, metadata);
+			return true;
+		} catch (IOException e) {
+			logger.error("Failed to update metadata file {}: {}", metadataFile, e.getMessage(), e);
+			return false;
+		}
+	}
+
+	private boolean removeUnlistedMarkerFromMetadataFile(Path metadataFile) {
+		try {
+			JdkMetadata metadata = MetadataUtils.readMetadataFile(metadataFile);
+			if (metadata.getUnlistedSince() == null
+					|| metadata.getUnlistedSince().isBlank()) {
+				return false;
+			}
+			metadata.setUnlistedSince(null);
+			MetadataUtils.saveMetadataFile(metadataFile, metadata);
+			return true;
+		} catch (IOException e) {
+			logger.error("Failed to update metadata file {}: {}", metadataFile, e.getMessage(), e);
+			return false;
 		}
 	}
 

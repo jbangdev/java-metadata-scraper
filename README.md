@@ -80,6 +80,24 @@ The `index` command can be run any time you think the indices might be out of da
 
 And finally the `clean` command can be used to get rid of any invalid or orphaned data. If you run it without any flags it will give an overview of everything that could be cleaned up without actually doing any of the cleaning yet.
 
+### Mark unlisted metadata
+
+You can ask `update` to mark metadata files that are no longer listed by upstream sources:
+
+```bash
+jbang scraper@jbangdev/jdkdb-scraper update --mark-unlisted
+```
+
+When enabled, the scraper adds `unlisted_since` (current date, `YYYY-MM-DD`) to metadata files that were not listed in the current scan.
+
+Safety rules:
+
+- The field is added, never updated
+- The field is removed if the metadata appears again in a future scan
+- Marking is done per distro.
+- A distro is only marked when all scrapers for that distro ran and all of them completed without errors.
+- Index files (`all.json`, `latest.json`) are never marked.
+
 ## Command Line Options
 
 ### Main Command
@@ -87,101 +105,100 @@ And finally the `clean` command can be used to get rid of any invalid or orphane
 ```bash
 Usage: jdkdb-scraper [-hV] [COMMAND]
 Scrapes JDK metadata from various distros and generates index files
--h, --help      Show this help message and exit.
--V, --version   Print version information and exit.
+	-h, --help      Show this help message and exit.
+	-V, --version   Print version information and exit.
 Commands:
-update    Scrape JDK metadata from various distros and update metadata files
-index     Generate all.json files for distro directories by aggregating
-			individual metadata files
-download  Download and compute checksums for metadata files that have missing
-			checksum values
-clean     Clean up metadata by removing incomplete files and pruning old EA
-			releases
+	update    Scrape JDK metadata from various distros and update metadata files
+	index     Generate all.json files for distro directories by aggregating
+							individual metadata files
+	download  Download and compute checksums for metadata files that have missing
+							checksum values
+	clean     Clean up metadata by removing incomplete files and pruning old EA
+							releases
+	convert   Convert all json files to latest format
 ```
 
 ### Update Command
 
 ```bash
-Usage: jdkdb-scraper update [-hlV] [--from-start] [--no-download] [--no-index]
-							[-c=<checksumDir>] [-x=<indexDir>]
-							[--exclude=<excludeFileTypes>[,<excludeFileTypes>...]]...
-							[--include=<includeFileTypes>[,<includeFileTypes>...]]...
+Usage: jdkdb-scraper update [-hlV] [--from-start] [--mark-unlisted]
+							[-c=<checksumDir>]
 							[--limit-progress=<limitProgress>]
-							[--limit-total=<limitTotal>]
-							[-m=<metadataDir>] [--max-failures=<maxFailures>]
+							[--limit-total=<limitTotal>] [-m=<metadataDir>]
+							[--max-failures=<maxFailures>] [-p=<pruneDir>]
 							[--skip-ea=<skipEa>] [-t=<maxThreads>]
-							[-s=<scraperIds>[,<scraperIds>...]]...
-
+							[--exclude=<excludeFileTypes>[,
+							<excludeFileTypes>...]]...
+							[--include=<includeFileTypes>[,
+							<includeFileTypes>...]]... [-s=<scraperIds>[,
+							<scraperIds>...]]...
 Scrape JDK metadata from various distros and update metadata files
 
 Options:
 -c, --checksum-dir=<checksumDir>
-					Directory to store checksum files (default: db/checksums)
+							Directory to store checksum files (default:
+							db/checksums)
 	--exclude=<excludeFileTypes>[,<excludeFileTypes>...]
-					Exclude these file types (e.g., msi,exe). These types will
-					not be downloaded.
+							Exclude these file types (e.g., msi,exe). These
+							types will not be downloaded.
 	--from-start   Ignore existing metadata files and scrape all items from
-					the start
+							the start
 -h, --help         Show this help message and exit.
 	--include=<includeFileTypes>[,<includeFileTypes>...]
-					Include only these file types (e.g., tar_gz,zip). If
-					specified, only these types will be downloaded.
+							Include only these file types (e.g., tar_gz,zip). If
+							specified, only these types will be downloaded.
 -l, --list         List all available scraper IDs and exit
 	--limit-progress=<limitProgress>
-					Maximum number of metadata items to process per scraper
-					before aborting (default: unlimited)
+							Maximum number of metadata items to process per
+							scraper before aborting (default: unlimited)
 	--limit-total=<limitTotal>
-					Maximum total number of downloads to accept before
-					stopping (default: unlimited)
+							Maximum total number of downloads to accept before
+							stopping (default: unlimited)
 -m, --metadata-dir=<metadataDir>
-					Directory to store metadata files (default: db/metadata)
+							Directory to store metadata files (default:
+							db/metadata)
 	--max-failures=<maxFailures>
-					Maximum number of allowed failures per scraper before
-					aborting that scraper (default: 10)
-	--no-download  Skip downloading files and only generate metadata (for
-					testing/dry-run)
-	--no-index     Skip generating index files (for testing/dry-run)
+							Maximum number of allowed failures per scraper
+							before aborting that scraper (default: 10)
+	--mark-unlisted
+							Mark metadata files that were not listed in the
+							current full successful distro scan by adding
+							unlisted_since
 -s, --scrapers=<scraperIds>[,<scraperIds>...]
-					Comma-separated list of scraper IDs to run (if not
-					specified, all scrapers run)
+							Comma-separated list of scraper IDs to run (if not
+							specified, all scrapers run)
 	--skip-ea=<skipEa>
-					Skip early access (EA) releases older than the specified
-					duration (e.g., '6m' for 6 months, '1y' for 1 year)
-					(default: 6m)
+							Skip early access (EA) releases older than the
+							specified duration (e.g., '6m' for 6 months, '1y'
+							for 1 year) (default: 6m)
 -t, --threads=<maxThreads>
-					Maximum number of parallel scraper threads (default:
-					number of processors)
+							Maximum number of parallel scraper threads (default:
+							number of processors)
 -V, --version      Print version information and exit.
--x, --index-dir=<indexDir>
-					Directory to write generated index files to (default:
-					db/metadata)
 ```
 
 ### Index Command
 
 ```bash
 Usage: jdkdb-scraper index [-hV] [--allow-incomplete] [-m=<metadataDir>]
-						[-x=<indexDir>] [-v=<distroNames>[,<distroNames>...]]...
-
+							[-x=<indexDir>] [-v=<distroNames>[,
+							<distroNames>...]]...
 Generate all.json files for distro directories by aggregating individual
 metadata files
-
-Options:
-	--allow-incomplete
-					Allow incomplete metadata files (missing checksums) to be
-					included
+	--allow-incomplete   Allow incomplete metadata files (missing checksums)
+							to be included
 -h, --help         Show this help message and exit.
 -m, --metadata-dir=<metadataDir>
-					Directory containing metadata files (default:
-					db/metadata)
+							Directory containing metadata files (default:
+							db/metadata)
 -v, --distros=<distroNames>[,<distroNames>...]
-					Comma-separated list of distro names to regenerate
-					all.json for (if not specified, all distros are
-					processed)
+							Comma-separated list of distro names to regenerate
+							all.json for (if not specified, all distros are
+							processed)
 -V, --version      Print version information and exit.
 -x, --index-dir=<indexDir>
-					Directory to write generated index files to (default:
-					db/metadata)
+							Directory to write generated index files to
+							(default: db/metadata)
 ```
 
 ### Download Command
@@ -189,45 +206,42 @@ Options:
 ```bash
 Usage: jdkdb-scraper download [-hV] [--randomize] [--stats-only]
 							[-c=<checksumDir>]
-							[--exclude=<excludeFileTypes>[,<excludeFileTypes>...]]...
-							[--include=<includeFileTypes>[,<includeFileTypes>...]]...
 							[--limit-progress=<limitProgress>]
-							[--limit-total=<limitTotal>]
-							[-m=<metadataDir>] [-t=<maxThreads>]
-							[-v=<distroNames>[,<distroNames>...]]...
-
+							[--limit-total=<limitTotal>] [-m=<metadataDir>]
+							[-t=<maxThreads>] [--exclude=<excludeFileTypes>[,
+							<excludeFileTypes>...]]...
+							[--include=<includeFileTypes>[,
+							<includeFileTypes>...]]... [-v=<distroNames>[,
+							<distroNames>...]]...
 Download and compute checksums for metadata files that have missing checksum
 values
-
-Options:
 -c, --checksum-dir=<checksumDir>
-					Directory to store checksum files (default: db/checksums)
+							Directory to store checksum files (default: db/checksums)
 	--exclude=<excludeFileTypes>[,<excludeFileTypes>...]
-					Exclude these file types (e.g., msi,exe). These types will
-					not be downloaded.
+							Exclude these file types (e.g., msi,exe). These types will
+							not be downloaded.
 -h, --help         Show this help message and exit.
 	--include=<includeFileTypes>[,<includeFileTypes>...]
-					Include only these file types (e.g., tar_gz,zip). If
-					specified, only these types will be downloaded.
+							Include only these file types (e.g., tar_gz,zip). If
+							specified, only these types will be downloaded.
 	--limit-progress=<limitProgress>
-					Maximum number of metadata items to process per scraper
-					before aborting (default: unlimited)
+							Maximum number of metadata items to process per scraper
+							before aborting (default: unlimited)
 	--limit-total=<limitTotal>
-					Maximum total number of downloads to accept before
-					stopping (default: unlimited)
+							Maximum total number of downloads to accept before
+							stopping (default: unlimited)
 -m, --metadata-dir=<metadataDir>
-					Directory containing metadata files (default:
-					db/metadata)
+							Directory containing metadata files (default: db/metadata)
 	--randomize    Randomize the order of downloads instead of processing
-					files in order
+							files in order
 	--stats-only   Skip downloading files and only show statistics (for
-					testing/dry-run)
+							testing/dry-run)
 -t, --threads=<maxThreads>
-					Maximum number of parallel download threads (default:
-					number of processors)
+							Maximum number of parallel download threads (default:
+							number of processors)
 -v, --distros=<distroNames>[,<distroNames>...]
-					Comma-separated list of distro names to process (if not
-					specified, all distros are processed)
+							Comma-separated list of distro names to process (if not
+							specified, all distros are processed)
 -V, --version      Print version information and exit.
 ```
 
@@ -235,35 +249,33 @@ Options:
 
 ```bash
 Usage: jdkdb-scraper clean [-hV] [--dry-run] [--prune-checksums]
-						[--remove-invalid] [-c=<checksumDir>]
-						[-m=<metadataDir>] [--prune-ea=<pruneEa>]
-						[--remove-incomplete=<removeIncomplete>]
-
+							[--remove-invalid] [-c=<checksumDir>]
+							[-m=<metadataDir>] [--prune-ea=<pruneEa>]
+							[--remove-incomplete=<removeIncomplete>]
 Clean up metadata by removing incomplete files and pruning old EA releases
-
-Options:
 -c, --checksum-dir=<checksumDir>
-					Directory containing checksum files (default:
-					db/checksums)
+							Directory containing checksum files (default:
+							db/checksums)
 	--dry-run      Show statistics without actually deleting files
 -h, --help         Show this help message and exit.
 -m, --metadata-dir=<metadataDir>
-					Directory containing metadata files (default:
-					db/metadata)
+							Directory containing metadata files (default:
+							db/metadata)
 	--prune-checksums
-					Remove orphaned checksum files that don't have a matching
-					metadata file
+							Remove orphaned checksum files that don't have a
+							matching metadata file
 	--prune-ea=<pruneEa>
-					Prune EA releases older than specified duration (e.g.,
-					30d, 3w, 6m, 1y). Duration format: [number][d|w|m|y]
+							Prune EA releases older than specified duration (e.
+							g., 30d, 3w, 6m, 1y). Duration format: [number]
+							[d|w|m|y]
 	--remove-incomplete=<removeIncomplete>
-					Remove metadata files with incomplete data. Options:
-					checksums (missing checksums), release-info (missing
-					release info), all (either missing checksums or release
-					info) (default: all)
+							Remove metadata files with incomplete data.
+							Options: checksums (missing checksums),
+							release-info (missing release info), all (either
+							missing checksums or release info) (default: all)
 	--remove-invalid
-					Remove metadata files that fail validation
-					(MetadataUtils.isValidMetadata)
+							Remove metadata files that fail validation
+							(MetadataUtils.isValidMetadata)
 -V, --version      Print version information and exit.
 ```
 

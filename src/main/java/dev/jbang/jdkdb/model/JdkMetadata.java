@@ -138,6 +138,10 @@ public class JdkMetadata {
 	@JsonInclude(JsonInclude.Include.NON_NULL)
 	private Map<String, String> releaseInfo;
 
+	@JsonProperty("unlisted_since")
+	@JsonInclude(JsonInclude.Include.NON_NULL)
+	private String unlistedSince;
+
 	@JsonIgnore
 	private transient Path metadataFile;
 
@@ -349,6 +353,15 @@ public class JdkMetadata {
 
 	public JdkMetadata setReleaseInfo(Map<String, String> releaseInfo) {
 		this.releaseInfo = releaseInfo;
+		return this;
+	}
+
+	public String getUnlistedSince() {
+		return unlistedSince;
+	}
+
+	public JdkMetadata setUnlistedSince(String unlistedSince) {
+		this.unlistedSince = unlistedSince;
 		return this;
 	}
 
