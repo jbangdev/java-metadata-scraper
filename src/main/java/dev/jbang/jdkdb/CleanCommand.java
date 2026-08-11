@@ -51,14 +51,14 @@ public class CleanCommand implements Callable<Integer> {
 	private IncompleteType removeIncomplete;
 
 	@Option(
-			names = {"--remove-invalid"},
-			description = "Remove metadata files that fail validation (MetadataUtils.isValidMetadata)")
-	private boolean removeInvalid;
-
-	@Option(
 			names = {"--remove-orphaned"},
 			description = "Remove orphaned checksum files that don't have a matching metadata file")
 	private boolean removeOrphanedChecksums;
+
+	@Option(
+			names = {"--prune-invalid"},
+			description = "Prune metadata files that fail validation (MetadataUtils.isValidMetadata)")
+	private boolean pruneInvalid;
 
 	@Option(
 			names = {"--prune-ea"},
@@ -97,7 +97,7 @@ public class CleanCommand implements Callable<Integer> {
 
 		// Apply default values if no options specified
 		if (removeIncomplete == null
-				&& !removeInvalid
+				&& !pruneInvalid
 				&& pruneEa == null
 				&& pruneUnlisted == null
 				&& !removeOrphanedChecksums
@@ -105,7 +105,7 @@ public class CleanCommand implements Callable<Integer> {
 			logger.info("No options specified, using defaults: --remove-incomplete=all --prune-ea=6m --dry-run");
 			logger.info("");
 			removeIncomplete = IncompleteType.all;
-			removeInvalid = true;
+			pruneInvalid = true;
 			removeOrphanedChecksums = true;
 			pruneEa = "6m";
 			pruneUnlisted = "1w";
@@ -118,7 +118,7 @@ public class CleanCommand implements Callable<Integer> {
 				(removeIncomplete != null
 						? removeIncomplete.toString().toLowerCase().replace("_", "-")
 						: "disabled"));
-		logger.info("  Remove invalid: {}", removeInvalid);
+		logger.info("  Prune invalid: {}", pruneInvalid);
 		logger.info("  Prune EA: {}", (pruneEa != null ? pruneEa : "disabled"));
 		logger.info("  Prune unlisted: {}", (pruneUnlisted != null ? pruneUnlisted : "disabled"));
 		logger.info("  Remove orphaned checksums: {}", removeOrphanedChecksums);
@@ -286,10 +286,10 @@ public class CleanCommand implements Callable<Integer> {
 		String reason = null;
 
 		// Check for invalid metadata
-		if (removeInvalid && !shouldDelete) {
+		if (pruneInvalid && !shouldDelete) {
 			if (!MetadataUtils.isValidMetadata(metadata)) {
 				stats.invalidFiles++;
-				shouldDelete = true;
+				shouldPrune = true;
 				reason = "invalid (failed validation)";
 			}
 		}

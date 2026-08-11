@@ -105,6 +105,33 @@ class CleanCommandTest {
 		assertThat(exit).isEqualTo(1);
 	}
 
+	@Test
+	void pruneInvalidMovesMetadataToPruneDir() throws Exception {
+		Path metadataRoot = tempDir.resolve("metadata");
+		Path checksumRoot = tempDir.resolve("checksums");
+		Path pruneRoot = tempDir.resolve("pruned");
+		Path distroMetadata = metadataRoot.resolve("temurin");
+		Files.createDirectories(distroMetadata);
+		Files.createDirectories(checksumRoot.resolve("temurin"));
+
+		Path invalidMetadata = distroMetadata.resolve("invalid.json");
+		Files.writeString(invalidMetadata, "{}");
+
+		int exit = new CommandLine(new CleanCommand())
+				.execute(
+						"--metadata-dir",
+						metadataRoot.toString(),
+						"--checksum-dir",
+						checksumRoot.toString(),
+						"--prune-dir",
+						pruneRoot.toString(),
+						"--prune-invalid");
+
+		assertThat(exit).isZero();
+		assertThat(invalidMetadata).doesNotExist();
+		assertThat(pruneRoot.resolve("temurin/invalid.json")).exists();
+	}
+
 	private String metadataJson(String distro, String filename, String unlistedSince) {
 		String unlisted = unlistedSince == null ? "" : "\n  \"unlisted_since\": \"" + unlistedSince + "\",";
 		return """
