@@ -62,9 +62,19 @@ public class CleanCommand implements Callable<Integer> {
 
 	@Option(
 			names = {"--prune-ea"},
+			arity = "0..1",
+			paramLabel = "SINCE",
 			description =
 					"Prune EA releases older than specified duration (e.g., 30d, 3w, 6m, 1y). Duration format: [number][d|w|m|y]")
 	private String pruneEa;
+
+	@Option(
+			names = {"--prune-unlisted"},
+			arity = "0..1",
+			paramLabel = "SINCE",
+			description =
+					"Prune metadata files with unlisted_since up to SINCE. SINCE uses duration format [number][d|w|m|y].")
+	private String pruneUnlisted;
 
 	@Option(
 			names = {"-p", "--prune-dir"},
@@ -82,15 +92,23 @@ public class CleanCommand implements Callable<Integer> {
 		logger.info("Java Metadata Scraper - Clean");
 		logger.info("=============================");
 		logger.info("Metadata directory: {}", metadataDir.toAbsolutePath());
+		logger.info("Checksum directory: {}", checksumDir.toAbsolutePath());
+		logger.info("Prune directory: {}", pruneDir.toAbsolutePath());
 
 		// Apply default values if no options specified
-		if (removeIncomplete == null && !removeInvalid && pruneEa == null && !removeOrphanedChecksums && !dryRun) {
+		if (removeIncomplete == null
+				&& !removeInvalid
+				&& pruneEa == null
+				&& pruneUnlisted == null
+				&& !removeOrphanedChecksums
+				&& !dryRun) {
 			logger.info("No options specified, using defaults: --remove-incomplete=all --prune-ea=6m --dry-run");
 			logger.info("");
 			removeIncomplete = IncompleteType.all;
 			removeInvalid = true;
 			removeOrphanedChecksums = true;
 			pruneEa = "6m";
+			pruneUnlisted = "1w";
 			dryRun = true;
 		}
 
@@ -102,7 +120,7 @@ public class CleanCommand implements Callable<Integer> {
 						: "disabled"));
 		logger.info("  Remove invalid: {}", removeInvalid);
 		logger.info("  Prune EA: {}", (pruneEa != null ? pruneEa : "disabled"));
-		logger.info("  Prune directory: {}", pruneDir);
+		logger.info("  Prune unlisted: {}", (pruneUnlisted != null ? pruneUnlisted : "disabled"));
 		logger.info("  Remove orphaned checksums: {}", removeOrphanedChecksums);
 		logger.info("  Dry run: {}", dryRun);
 		logger.info("");
@@ -114,7 +132,7 @@ public class CleanCommand implements Callable<Integer> {
 		}
 
 		// Parse prune-ea duration if specified
-		Instant pruneThreshold = null;
+		Instant pruneEaThreshold = null;
 		if (pruneEa != null) {
 			Duration duration = MetadataUtils.parseDuration(pruneEa);
 			if (duration == null) {
@@ -122,8 +140,21 @@ public class CleanCommand implements Callable<Integer> {
 				logger.error("Expected format: [number][d|w|m|y] (e.g., 30d, 3w, 6m, 1y)");
 				return 1;
 			}
-			pruneThreshold = Instant.now().minus(duration);
-			logger.info("Pruning EA releases older than: {} (before {})", pruneEa, pruneThreshold);
+			pruneEaThreshold = Instant.now().minus(duration);
+			logger.info("Pruning EA releases older than: {} (before {})", pruneEa, pruneEaThreshold);
+			logger.info("");
+		}
+
+		Instant pruneUnlistedThreshold = null;
+		if (pruneUnlisted != null) {
+			Duration duration = MetadataUtils.parseDuration(pruneUnlisted);
+			if (duration == null) {
+				logger.error("Error: Invalid --prune-unlisted SINCE value: {}", pruneUnlisted);
+				logger.error("Expected format: [number][d|w|m|y] (e.g., 30d, 3w, 6m, 1y)");
+				return 1;
+			}
+			pruneUnlistedThreshold = Instant.now().minus(duration);
+			logger.info("Pruning unlisted metadata up to: {} (<= {})", pruneUnlisted, pruneUnlistedThreshold);
 			logger.info("");
 		}
 
@@ -131,12 +162,19 @@ public class CleanCommand implements Callable<Integer> {
 		final CleanStats stats = new CleanStats();
 		final List<Path> filesToDelete = new ArrayList<>();
 		final List<Path> filesToPrune = new ArrayList<>();
-		final Instant finalPruneThreshold = pruneThreshold;
+		final Instant finalPruneEaThreshold = pruneEaThreshold;
+		final Instant finalPruneUnlistedThreshold = pruneUnlistedThreshold;
 
 		List<JdkMetadata> metadataList = MetadataUtils.collectAllMetadata(distroDir, 2, true, true);
 		for (JdkMetadata metadata : metadataList) {
 			try {
-				processMetadataFile(metadata, stats, filesToDelete, filesToPrune, finalPruneThreshold);
+				processMetadataFile(
+						metadata,
+						stats,
+						filesToDelete,
+						filesToPrune,
+						finalPruneEaThreshold,
+						finalPruneUnlistedThreshold);
 			} catch (IOException e) {
 				logger.error("Failed to process {}: {}", metadata.metadataFile().getFileName(), e.getMessage());
 				stats.errors++;
@@ -160,6 +198,7 @@ public class CleanCommand implements Callable<Integer> {
 		logger.info("   - missing release info): {}", stats.incompleteReleaseInfo);
 		logger.info("Invalid files: {}", stats.invalidFiles);
 		logger.info("Old EA releases: {}", stats.oldEaReleases);
+		logger.info("Unlisted releases: {}", stats.unlistedReleases);
 		logger.info("Orphaned checksum files: {}", stats.orphanedChecksums);
 		logger.info("Errors: {}", stats.errors);
 		logger.info("");
@@ -235,7 +274,8 @@ public class CleanCommand implements Callable<Integer> {
 			CleanStats stats,
 			List<Path> filesToDelete,
 			List<Path> filesToPrune,
-			Instant pruneThreshold)
+			Instant pruneEaThreshold,
+			Instant pruneUnlistedThreshold)
 			throws IOException {
 		stats.totalFiles++;
 
@@ -287,12 +327,23 @@ public class CleanCommand implements Callable<Integer> {
 		}
 
 		// Check for old EA releases
-		if (pruneThreshold != null && "ea".equalsIgnoreCase(metadata.getReleaseType()) && !shouldDelete) {
+		if (pruneEaThreshold != null && "ea".equalsIgnoreCase(metadata.getReleaseType()) && !shouldDelete) {
 			FileTime lastModified = Files.getLastModifiedTime(metadataFile);
-			if (lastModified.toInstant().isBefore(pruneThreshold)) {
+			if (lastModified.toInstant().isBefore(pruneEaThreshold)) {
 				stats.oldEaReleases++;
 				shouldPrune = true;
 				reason = "old EA release (last modified: " + lastModified.toInstant() + ")";
+			}
+		}
+
+		if (pruneUnlistedThreshold != null && !shouldDelete) {
+			String unlistedSince = metadata.getUnlistedSince();
+			if (matchesUnlistedSince(unlistedSince, pruneUnlistedThreshold)) {
+				stats.unlistedReleases++;
+				if (!shouldPrune) {
+					shouldPrune = true;
+					reason = "unlisted since " + unlistedSince;
+				}
 			}
 		}
 
@@ -385,6 +436,20 @@ public class CleanCommand implements Callable<Integer> {
 		}
 	}
 
+	private boolean matchesUnlistedSince(String unlistedSince, Instant threshold) {
+		if (unlistedSince == null || unlistedSince.isBlank()) {
+			return false;
+		}
+
+		String value = unlistedSince.trim();
+		try {
+			return !Instant.parse(value).isAfter(threshold);
+		} catch (RuntimeException ignored) {
+			logger.debug("Ignoring metadata with non-instant unlisted_since value: {}", value);
+			return false;
+		}
+	}
+
 	/**
 	 * Remove orphaned checksum files that don't have corresponding metadata files.
 	 * This is run after metadata cleanup to remove checksums for deleted metadata.
@@ -472,6 +537,7 @@ public class CleanCommand implements Callable<Integer> {
 		int incompleteReleaseInfo = 0;
 		int invalidFiles = 0;
 		int oldEaReleases = 0;
+		int unlistedReleases = 0;
 		int orphanedChecksums = 0;
 		int errors = 0;
 	}
