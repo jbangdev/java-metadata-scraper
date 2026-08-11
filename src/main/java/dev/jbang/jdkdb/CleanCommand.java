@@ -5,6 +5,7 @@ import dev.jbang.jdkdb.util.MetadataUtils;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.time.Instant;
@@ -66,6 +67,12 @@ public class CleanCommand implements Callable<Integer> {
 	private String pruneEa;
 
 	@Option(
+			names = {"-p", "--prune-dir"},
+			description = "Directory to move pruned files into (default: db/pruned)",
+			defaultValue = "db/pruned")
+	private Path pruneDir;
+
+	@Option(
 			names = {"--dry-run"},
 			description = "Show statistics without actually deleting files")
 	private boolean dryRun;
@@ -95,6 +102,7 @@ public class CleanCommand implements Callable<Integer> {
 						: "disabled"));
 		logger.info("  Remove invalid: {}", removeInvalid);
 		logger.info("  Prune EA: {}", (pruneEa != null ? pruneEa : "disabled"));
+		logger.info("  Prune directory: {}", pruneDir);
 		logger.info("  Remove orphaned checksums: {}", removeOrphanedChecksums);
 		logger.info("  Dry run: {}", dryRun);
 		logger.info("");
@@ -119,15 +127,16 @@ public class CleanCommand implements Callable<Integer> {
 			logger.info("");
 		}
 
-		// Collect files to delete
+		// Collect files to delete/prune
 		final CleanStats stats = new CleanStats();
 		final List<Path> filesToDelete = new ArrayList<>();
+		final List<Path> filesToPrune = new ArrayList<>();
 		final Instant finalPruneThreshold = pruneThreshold;
 
 		List<JdkMetadata> metadataList = MetadataUtils.collectAllMetadata(distroDir, 2, true, true);
 		for (JdkMetadata metadata : metadataList) {
 			try {
-				processMetadataFile(metadata, stats, filesToDelete, finalPruneThreshold);
+				processMetadataFile(metadata, stats, filesToDelete, filesToPrune, finalPruneThreshold);
 			} catch (IOException e) {
 				logger.error("Failed to process {}: {}", metadata.metadataFile().getFileName(), e.getMessage());
 				stats.errors++;
@@ -155,18 +164,42 @@ public class CleanCommand implements Callable<Integer> {
 		logger.info("Errors: {}", stats.errors);
 		logger.info("");
 
-		if (filesToDelete.isEmpty()) {
-			logger.info("No files to delete.");
+		if (filesToDelete.isEmpty() && filesToPrune.isEmpty()) {
+			logger.info("No files to delete or prune.");
 			return 0;
 		}
 
+		logger.info("Files to prune: {}", filesToPrune.size());
 		logger.info("Files to delete: {}", filesToDelete.size());
 
 		if (dryRun) {
 			logger.info("");
-			logger.info("DRY RUN - No files were actually deleted.");
-			logger.info("Run without --dry-run to perform actual deletion.");
+			logger.info("DRY RUN - No files were actually pruned or deleted.");
+			logger.info("Run without --dry-run to perform actual prune/delete operations.");
 		} else {
+			logger.info("");
+			logger.info("Pruning files...");
+			int prunedCount = 0;
+			int pruneFailedCount = 0;
+
+			for (Path file : filesToPrune) {
+				try {
+					Path target = resolvePruneTarget(file);
+					if (target == null) {
+						logger.error("  Failed to prune {}: unable to resolve prune target", file.getFileName());
+						pruneFailedCount++;
+						continue;
+					}
+					Files.createDirectories(target.getParent());
+					Files.move(file, target, StandardCopyOption.REPLACE_EXISTING);
+					prunedCount++;
+					logger.info("  Pruned: {}", file.getFileName());
+				} catch (IOException e) {
+					logger.error("  Failed to prune {}: {}", file.getFileName(), e.getMessage());
+					pruneFailedCount++;
+				}
+			}
+
 			logger.info("");
 			logger.info("Deleting files...");
 			int deletedCount = 0;
@@ -184,9 +217,13 @@ public class CleanCommand implements Callable<Integer> {
 			}
 
 			logger.info("");
+			logger.info("Pruned: {} files", prunedCount);
+			if (pruneFailedCount > 0) {
+				logger.info("Failed to prune: {} files", pruneFailedCount);
+			}
 			logger.info("Deleted: {} files", deletedCount);
 			if (failedCount > 0) {
-				logger.info("Failed: {} files", failedCount);
+				logger.info("Failed to delete: {} files", failedCount);
 			}
 		}
 
@@ -194,13 +231,18 @@ public class CleanCommand implements Callable<Integer> {
 	}
 
 	private void processMetadataFile(
-			JdkMetadata metadata, CleanStats stats, List<Path> filesToDelete, Instant pruneThreshold)
+			JdkMetadata metadata,
+			CleanStats stats,
+			List<Path> filesToDelete,
+			List<Path> filesToPrune,
+			Instant pruneThreshold)
 			throws IOException {
 		stats.totalFiles++;
 
 		Path metadataFile = metadata.metadataFile();
 
 		boolean shouldDelete = false;
+		boolean shouldPrune = false;
 		String reason = null;
 
 		// Check for invalid metadata
@@ -249,14 +291,97 @@ public class CleanCommand implements Callable<Integer> {
 			FileTime lastModified = Files.getLastModifiedTime(metadataFile);
 			if (lastModified.toInstant().isBefore(pruneThreshold)) {
 				stats.oldEaReleases++;
-				shouldDelete = true;
+				shouldPrune = true;
 				reason = "old EA release (last modified: " + lastModified.toInstant() + ")";
 			}
 		}
 
 		if (shouldDelete) {
-			filesToDelete.add(metadataFile);
+			addIfMissing(filesToDelete, metadataFile);
 			logger.debug("  - {} ({})", metadataFile.getFileName(), reason);
+		} else if (shouldPrune) {
+			addIfMissing(filesToPrune, metadataFile);
+			for (Path checksumFile : getRelatedChecksumFiles(metadata, metadataFile)) {
+				addIfMissing(filesToPrune, checksumFile);
+			}
+			logger.debug("  - {} ({})", metadataFile.getFileName(), reason);
+		}
+	}
+
+	private List<Path> getRelatedChecksumFiles(JdkMetadata metadata, Path metadataFile) {
+		List<Path> checksumFiles = new ArrayList<>();
+
+		String distro = metadata.getDistro();
+		if (distro == null || distro.isBlank()) {
+			Path parent = metadataFile.getParent();
+			if (parent != null) {
+				distro = parent.getFileName().toString();
+			}
+		}
+
+		if (distro == null || distro.isBlank()) {
+			return checksumFiles;
+		}
+
+		Path distroChecksumDir = checksumDir.resolve(distro);
+		if (!Files.exists(distroChecksumDir) || !Files.isDirectory(distroChecksumDir)) {
+			return checksumFiles;
+		}
+
+		String metadataFileName = metadataFile.getFileName().toString();
+		if (!metadataFileName.endsWith(".json")) {
+			return checksumFiles;
+		}
+
+		String baseFileName = metadataFileName.substring(0, metadataFileName.length() - 5);
+		String[] extensions = {".md5", ".sha1", ".sha256", ".sha512"};
+
+		for (String extension : extensions) {
+			Path checksumFile = distroChecksumDir.resolve(baseFileName + extension);
+			if (Files.exists(checksumFile) && Files.isRegularFile(checksumFile)) {
+				checksumFiles.add(checksumFile);
+			}
+		}
+
+		return checksumFiles;
+	}
+
+	private Path resolvePruneTarget(Path file) {
+		Path absoluteFile = file.toAbsolutePath().normalize();
+		Path absoluteMetadataDir = metadataDir.toAbsolutePath().normalize();
+		Path absoluteChecksumDir = checksumDir.toAbsolutePath().normalize();
+
+		if (absoluteFile.startsWith(absoluteMetadataDir)) {
+			Path relative = absoluteMetadataDir.relativize(absoluteFile);
+			if (relative.getNameCount() >= 2) {
+				return pruneDir.resolve(relative.getName(0).toString())
+						.resolve(relative.getFileName().toString());
+			}
+		}
+
+		if (absoluteFile.startsWith(absoluteChecksumDir)) {
+			Path relative = absoluteChecksumDir.relativize(absoluteFile);
+			if (relative.getNameCount() >= 2) {
+				return pruneDir.resolve(relative.getName(0).toString())
+						.resolve(relative.getFileName().toString());
+			}
+		}
+
+		Path parent = absoluteFile.getParent();
+		if (parent != null) {
+			Path distro = parent.getFileName();
+			if (distro != null) {
+				return pruneDir.resolve(distro.toString())
+						.resolve(absoluteFile.getFileName().toString());
+			}
+		}
+
+		return null;
+	}
+
+	private void addIfMissing(List<Path> files, Path file) {
+		if (!files.contains(file)) {
+			files.add(file);
 		}
 	}
 
@@ -321,7 +446,7 @@ public class CleanCommand implements Callable<Integer> {
 						if (!Files.exists(metadataFile)) {
 							// Metadata file doesn't exist, mark checksum for deletion
 							stats.orphanedChecksums++;
-							filesToDelete.add(checksumFile);
+							addIfMissing(filesToDelete, checksumFile);
 							logger.debug(
 									"  - {} (orphaned - no metadata file {})",
 									checksumFile.getFileName(),
