@@ -842,11 +842,12 @@ public class MetadataUtils {
 			// Missing release info is invalid
 			return false;
 		}
-		if (releaseInfo == null || releaseInfo.isEmpty()) {
+		if (releaseInfo.isEmpty()) {
 			// Empty release info is okay
 			return true;
 		}
-		// We will consider release info valid if it contains at least a version
-		return releaseInfo.containsKey("JAVA_VERSION");
+		// For now we will just accept any release info that is not null,
+		// but we could add more validation here if needed
+		return true;
 	}
 }
