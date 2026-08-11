@@ -686,7 +686,10 @@ public class MetadataUtils {
 	public static List<JdkMetadata> collectAllMetadata(
 			Path dir, int maxDepth, boolean includeComplete, boolean includeIncomplete) throws IOException {
 		List<JdkMetadata> allMetadata = new ArrayList<>();
+		long[] lastProgressTime = {System.currentTimeMillis()};
+		final long PROGRESS_INTERVAL = 10000; // 10 seconds
 
+		logger.info("Collecting metadata...");
 		try (Stream<Path> paths = Files.walk(dir, maxDepth)) {
 			paths.filter(Files::isRegularFile)
 					.filter(p -> p.getFileName().toString().endsWith(".json"))
@@ -700,12 +703,20 @@ public class MetadataUtils {
 							if ((includeComplete && !isIncomplete) || (includeIncomplete && isIncomplete)) {
 								allMetadata.add(metadata);
 							}
+
+							// Print progress every 10 seconds
+							long currentTime = System.currentTimeMillis();
+							if (currentTime - lastProgressTime[0] >= PROGRESS_INTERVAL) {
+								logger.info("  Scanned {} files...", allMetadata.size());
+								lastProgressTime[0] = currentTime;
+							}
 						} catch (IOException e) {
 							logger.error("Failed to read metadata file: {} - {}", metadataFile, e.getMessage());
 						}
 					});
 		}
 
+		logger.info("Collected {} metadata files", allMetadata.size());
 		return allMetadata;
 	}
 
