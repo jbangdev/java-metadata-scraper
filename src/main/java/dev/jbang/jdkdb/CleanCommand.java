@@ -55,15 +55,15 @@ public class CleanCommand implements Callable<Integer> {
 	private boolean removeInvalid;
 
 	@Option(
+			names = {"--remove-orphaned"},
+			description = "Remove orphaned checksum files that don't have a matching metadata file")
+	private boolean removeOrphanedChecksums;
+
+	@Option(
 			names = {"--prune-ea"},
 			description =
 					"Prune EA releases older than specified duration (e.g., 30d, 3w, 6m, 1y). Duration format: [number][d|w|m|y]")
 	private String pruneEa;
-
-	@Option(
-			names = {"--prune-checksums"},
-			description = "Remove orphaned checksum files that don't have a matching metadata file")
-	private boolean pruneChecksums;
 
 	@Option(
 			names = {"--dry-run"},
@@ -77,12 +77,12 @@ public class CleanCommand implements Callable<Integer> {
 		logger.info("Metadata directory: {}", metadataDir.toAbsolutePath());
 
 		// Apply default values if no options specified
-		if (removeIncomplete == null && !removeInvalid && pruneEa == null && !pruneChecksums && !dryRun) {
+		if (removeIncomplete == null && !removeInvalid && pruneEa == null && !removeOrphanedChecksums && !dryRun) {
 			logger.info("No options specified, using defaults: --remove-incomplete=all --prune-ea=6m --dry-run");
 			logger.info("");
 			removeIncomplete = IncompleteType.all;
 			removeInvalid = true;
-			pruneChecksums = true;
+			removeOrphanedChecksums = true;
 			pruneEa = "6m";
 			dryRun = true;
 		}
@@ -95,7 +95,7 @@ public class CleanCommand implements Callable<Integer> {
 						: "disabled"));
 		logger.info("  Remove invalid: {}", removeInvalid);
 		logger.info("  Prune EA: {}", (pruneEa != null ? pruneEa : "disabled"));
-		logger.info("  Prune checksums: {}", pruneChecksums);
+		logger.info("  Remove orphaned checksums: {}", removeOrphanedChecksums);
 		logger.info("  Dry run: {}", dryRun);
 		logger.info("");
 
@@ -134,11 +134,11 @@ public class CleanCommand implements Callable<Integer> {
 			}
 		}
 
-		// Prune orphaned checksum files (runs last after metadata cleanup)
-		if (pruneChecksums) {
-			logger.info("Pruning orphaned checksum files...");
+		// Remove orphaned checksum files (runs last after metadata cleanup)
+		if (removeOrphanedChecksums) {
+			logger.info("Removing orphaned checksum files...");
 			logger.info("");
-			pruneOrphanedChecksums(distroDir, stats, filesToDelete);
+			removeOrphanedChecksums(distroDir, stats, filesToDelete);
 		}
 
 		// Print summary
@@ -261,10 +261,10 @@ public class CleanCommand implements Callable<Integer> {
 	}
 
 	/**
-	 * Prune orphaned checksum files that don't have corresponding metadata files.
+	 * Remove orphaned checksum files that don't have corresponding metadata files.
 	 * This is run after metadata cleanup to remove checksums for deleted metadata.
 	 */
-	private void pruneOrphanedChecksums(Path metadataDistroDir, CleanStats stats, List<Path> filesToDelete) {
+	private void removeOrphanedChecksums(Path metadataDistroDir, CleanStats stats, List<Path> filesToDelete) {
 		if (!Files.exists(checksumDir) || !Files.isDirectory(checksumDir)) {
 			logger.warn("Checksum directory not found: {}", checksumDir.toAbsolutePath());
 			return;
