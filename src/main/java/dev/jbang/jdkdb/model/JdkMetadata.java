@@ -142,6 +142,10 @@ public class JdkMetadata {
 	@JsonInclude(JsonInclude.Include.NON_NULL)
 	private String unlistedSince;
 
+	@JsonProperty("missing_since")
+	@JsonInclude(JsonInclude.Include.NON_NULL)
+	private String missingSince;
+
 	@JsonIgnore
 	private transient Path metadataFile;
 
@@ -362,6 +366,15 @@ public class JdkMetadata {
 
 	public JdkMetadata setUnlistedSince(String unlistedSince) {
 		this.unlistedSince = unlistedSince;
+		return this;
+	}
+
+	public String getMissingSince() {
+		return missingSince;
+	}
+
+	public JdkMetadata setMissingSince(String missingSince) {
+		this.missingSince = missingSince;
 		return this;
 	}
 

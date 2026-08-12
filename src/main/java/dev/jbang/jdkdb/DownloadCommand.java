@@ -95,6 +95,11 @@ public class DownloadCommand implements Callable<Integer> {
 			description = "Randomize the order of downloads instead of processing files in order")
 	private boolean randomize;
 
+	@Option(
+			names = {"--mark-missing"},
+			description = "Mark files as missing_since when they return 403/404 during download")
+	private boolean markMissing;
+
 	@Override
 	public Integer call() throws Exception {
 		GitHubUtils.setupGitHubToken();
@@ -136,7 +141,8 @@ public class DownloadCommand implements Callable<Integer> {
 		var threadCount = maxThreads > 0 ? maxThreads : Runtime.getRuntime().availableProcessors();
 		DownloadManager downloadManager = statsOnly
 				? new NoOpDownloadManager(fileTypeFilter)
-				: new DefaultDownloadManager(threadCount, metadataDir, checksumDir, 3, limitTotal, fileTypeFilter);
+				: new DefaultDownloadManager(
+						threadCount, metadataDir, checksumDir, 3, limitTotal, fileTypeFilter, markMissing);
 		downloadManager.start();
 		if (fileTypeFilter != null) {
 			logger.info("File type filter enabled: {}", fileTypeFilter);

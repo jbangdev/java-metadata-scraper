@@ -39,6 +39,7 @@ public class DefaultDownloadManager implements DownloadManager {
 	private final ConcurrentHashMap<String, AtomicInteger> submittedPerDistro;
 	private final ConcurrentHashMap<String, AtomicInteger> completedPerDistro;
 	private final ConcurrentHashMap<String, AtomicInteger> failedPerDistro;
+	private final boolean markMissing;
 	private static final Logger logger = LoggerFactory.getLogger(DefaultDownloadManager.class);
 
 	/**
@@ -50,6 +51,7 @@ public class DefaultDownloadManager implements DownloadManager {
 	 * @param maxDownloadsPerHost Maximum number of concurrent downloads per host (default: 3)
 	 * @param limitTotal Maximum number of total downloads to accept (-1 for unlimited)
 	 * @param fileTypeFilter Set of file types to accept (null to accept all)
+	 * @param markMissing Whether to mark files as missing_since when they return 403/404
 	 */
 	public DefaultDownloadManager(
 			int threadCount,
@@ -57,7 +59,8 @@ public class DefaultDownloadManager implements DownloadManager {
 			Path checksumDir,
 			int maxDownloadsPerHost,
 			int limitTotal,
-			Set<JdkMetadata.FileType> fileTypeFilter) {
+			Set<JdkMetadata.FileType> fileTypeFilter,
+			boolean markMissing) {
 		this.downloadQueue = new LinkedBlockingQueue<>();
 		this.executorService = Executors.newFixedThreadPool(threadCount);
 		this.httpUtils = new HttpUtils();
@@ -75,6 +78,7 @@ public class DefaultDownloadManager implements DownloadManager {
 		this.submittedPerDistro = new ConcurrentHashMap<>();
 		this.completedPerDistro = new ConcurrentHashMap<>();
 		this.failedPerDistro = new ConcurrentHashMap<>();
+		this.markMissing = markMissing;
 	}
 
 	/**
@@ -333,13 +337,21 @@ public class DefaultDownloadManager implements DownloadManager {
 			try {
 				httpUtils.downloadFile(url, tempFile);
 			} catch (IOException e) {
-				if (unlistedSince.isPresent() && isHttpStatus(e, 403, 404)) {
-					task.downloadLogger()
-							.warn(
-									"Download returned 40X for unlisted package {} (unlisted_since={}). "
-											+ "This package is most likely not available anymore and is a candidate for pruning.",
-									filename,
-									unlistedSince.get());
+				if (isHttpStatus(e, 403, 404)) {
+					if (unlistedSince.isPresent()) {
+						task.downloadLogger()
+								.warn(
+										"Download returned 40X for unlisted package {} (unlisted_since={}). "
+												+ "This package is most likely not available anymore and is a candidate for pruning.",
+										filename,
+										unlistedSince.get());
+					}
+					if (markMissing && metadata.getMissingSince() == null) {
+						String today = java.time.LocalDate.now().toString();
+						metadata.setMissingSince(today);
+						task.downloadLogger().warn("Marking {} as missing_since={}", filename, today);
+						saveMetadata(task, metadata);
+					}
 				}
 				throw e;
 			}
@@ -364,6 +376,10 @@ public class DefaultDownloadManager implements DownloadManager {
 			// Update metadata with download results
 			DownloadResult result = new DownloadResult(md5, sha1, sha256, sha512, size);
 			metadata.download(result);
+			if (markMissing && metadata.getMissingSince() != null) {
+				task.downloadLogger().info("Clearing missing_since for {}", filename);
+				metadata.setMissingSince(null);
+			}
 
 			// Extract and parse release info from archive
 			try {
@@ -384,10 +400,7 @@ public class DefaultDownloadManager implements DownloadManager {
 			}
 
 			// Save metadata file
-			Path distroMetadataDir = metadataDir.resolve(task.distro);
-			Files.createDirectories(distroMetadataDir);
-			Path metadataFile = distroMetadataDir.resolve(metadata.metadataFile());
-			MetadataUtils.saveMetadataFile(metadataFile, metadata);
+			Path metadataFile = saveMetadata(task, metadata);
 
 			// Apply the original file timestamp to the metadata file
 			try {
@@ -402,6 +415,14 @@ public class DefaultDownloadManager implements DownloadManager {
 		} finally {
 			Files.deleteIfExists(tempFile);
 		}
+	}
+
+	private Path saveMetadata(DownloadTask task, JdkMetadata metadata) throws IOException {
+		Path distroMetadataDir = metadataDir.resolve(task.distro);
+		Files.createDirectories(distroMetadataDir);
+		Path metadataFile = distroMetadataDir.resolve(metadata.metadataFile());
+		MetadataUtils.saveMetadataFile(metadataFile, metadata);
+		return metadataFile;
 	}
 
 	/** Save checksum to file */
