@@ -156,16 +156,3 @@ public class HttpUtils {
 		throw lastException;
 	}
 }
-
-class HttpStatusException extends IOException {
-	private final int statusCode;
-
-	public HttpStatusException(int statusCode, String message) {
-		super(message);
-		this.statusCode = statusCode;
-	}
-
-	public int getStatusCode() {
-		return statusCode;
-	}
-}

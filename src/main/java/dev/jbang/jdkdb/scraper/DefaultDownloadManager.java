@@ -3,6 +3,7 @@ package dev.jbang.jdkdb.scraper;
 import dev.jbang.jdkdb.model.JdkMetadata;
 import dev.jbang.jdkdb.util.ArchiveUtils;
 import dev.jbang.jdkdb.util.HashUtils;
+import dev.jbang.jdkdb.util.HttpStatusException;
 import dev.jbang.jdkdb.util.HttpUtils;
 import dev.jbang.jdkdb.util.MetadataUtils;
 import java.io.*;
@@ -332,10 +333,10 @@ public class DefaultDownloadManager implements DownloadManager {
 			try {
 				httpUtils.downloadFile(url, tempFile);
 			} catch (IOException e) {
-				if (unlistedSince.isPresent() && isHttp404(e)) {
+				if (unlistedSince.isPresent() && isHttpStatus(e, 403, 404)) {
 					task.downloadLogger()
 							.warn(
-									"Download returned 404 for unlisted package {} (unlisted_since={}). "
+									"Download returned 40X for unlisted package {} (unlisted_since={}). "
 											+ "This package is most likely not available anymore and is a candidate for pruning.",
 									filename,
 									unlistedSince.get());
@@ -418,14 +419,14 @@ public class DefaultDownloadManager implements DownloadManager {
 		return Optional.of(value);
 	}
 
-	private boolean isHttp404(IOException exception) {
-		Throwable current = exception;
-		while (current != null) {
-			String message = current.getMessage();
-			if (message != null && message.contains("HTTP status: 404")) {
+	private boolean isHttpStatus(IOException e, int... statusCodes) {
+		if (!(e instanceof HttpStatusException hse)) {
+			return false;
+		}
+		for (int code : statusCodes) {
+			if (hse.getStatusCode() == code) {
 				return true;
 			}
-			current = current.getCause();
 		}
 		return false;
 	}
