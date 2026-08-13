@@ -1,16 +1,9 @@
 package dev.jbang.jdkdb.scraper;
 
 import dev.jbang.jdkdb.model.JdkMetadata;
-import dev.jbang.jdkdb.util.ArchiveUtils;
-import dev.jbang.jdkdb.util.HashUtils;
-import dev.jbang.jdkdb.util.HttpStatusException;
-import dev.jbang.jdkdb.util.HttpUtils;
-import dev.jbang.jdkdb.util.MetadataUtils;
 import java.io.*;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -24,23 +17,25 @@ import org.slf4j.LoggerFactory;
 public class DefaultDownloadManager implements DownloadManager {
 	private final BlockingQueue<DownloadTask> downloadQueue;
 	private final ExecutorService executorService;
-	private final HttpUtils httpUtils;
 	private final AtomicInteger activeDownloads;
 	private final AtomicInteger completedDownloads;
 	private final AtomicInteger failedDownloads;
 	private final AtomicInteger submittedCount;
-	private final Path metadataDir;
-	private final Path checksumDir;
 	private volatile boolean shutdownRequested;
 	private final int maxDownloadsPerHost;
 	private final int limitTotal;
+	private final DownloadProcessor downloadProcessor;
 	private final ConcurrentHashMap<String, AtomicInteger> activeDownloadsPerHost;
 	private final Set<JdkMetadata.FileType> fileTypeFilter;
 	private final ConcurrentHashMap<String, AtomicInteger> submittedPerDistro;
 	private final ConcurrentHashMap<String, AtomicInteger> completedPerDistro;
 	private final ConcurrentHashMap<String, AtomicInteger> failedPerDistro;
-	private final boolean markMissing;
 	private static final Logger logger = LoggerFactory.getLogger(DefaultDownloadManager.class);
+
+	@FunctionalInterface
+	public static interface DownloadProcessor {
+		void processDownload(DownloadTask task) throws IOException, InterruptedException;
+	}
 
 	/**
 	 * Create a new DefaultDownloadManager.
@@ -51,25 +46,20 @@ public class DefaultDownloadManager implements DownloadManager {
 	 * @param maxDownloadsPerHost Maximum number of concurrent downloads per host (default: 3)
 	 * @param limitTotal Maximum number of total downloads to accept (-1 for unlimited)
 	 * @param fileTypeFilter Set of file types to accept (null to accept all)
-	 * @param markMissing Whether to mark files as missing_since when they return 403/404
+	 * @param downloadProcessor Download processor to handle the actual download logic
 	 */
 	public DefaultDownloadManager(
 			int threadCount,
-			Path metadataDir,
-			Path checksumDir,
 			int maxDownloadsPerHost,
 			int limitTotal,
 			Set<JdkMetadata.FileType> fileTypeFilter,
-			boolean markMissing) {
+			DownloadProcessor downloadProcessor) {
 		this.downloadQueue = new LinkedBlockingQueue<>();
 		this.executorService = Executors.newFixedThreadPool(threadCount);
-		this.httpUtils = new HttpUtils();
 		this.activeDownloads = new AtomicInteger(0);
 		this.completedDownloads = new AtomicInteger(0);
 		this.failedDownloads = new AtomicInteger(0);
 		this.submittedCount = new AtomicInteger(0);
-		this.metadataDir = metadataDir;
-		this.checksumDir = checksumDir;
 		this.shutdownRequested = false;
 		this.maxDownloadsPerHost = maxDownloadsPerHost;
 		this.limitTotal = limitTotal;
@@ -78,7 +68,7 @@ public class DefaultDownloadManager implements DownloadManager {
 		this.submittedPerDistro = new ConcurrentHashMap<>();
 		this.completedPerDistro = new ConcurrentHashMap<>();
 		this.failedPerDistro = new ConcurrentHashMap<>();
-		this.markMissing = markMissing;
+		this.downloadProcessor = downloadProcessor;
 	}
 
 	/**
@@ -271,7 +261,7 @@ public class DefaultDownloadManager implements DownloadManager {
 		// Host slot acquired, proceed with download
 		activeDownloads.incrementAndGet();
 		try {
-			processDownload(task);
+			downloadProcessor.processDownload(task);
 			completedDownloads.incrementAndGet();
 			completedPerDistro
 					.computeIfAbsent(task.distro, k -> new AtomicInteger(0))
@@ -307,158 +297,13 @@ public class DefaultDownloadManager implements DownloadManager {
 		}
 	}
 
-	/** Process a single download task */
-	private void processDownload(DownloadTask task) throws IOException, InterruptedException {
-		JdkMetadata metadata = task.metadata;
-		String filename = metadata.getFilename();
-		String url = metadata.getUrl();
-		Optional<String> unlistedSince = findUnlistedSince(metadata);
-
-		if (filename == null || url == null) {
-			return;
-		}
-
-		if (!metadata.isValid()) {
-			task.downloadLogger().warn("Skipping invalid metadata for: {}", filename);
-			return;
-		}
-
-		Path tempFile = Files.createTempFile("jdk-metadata-", "-" + filename);
-
-		try {
-			if (unlistedSince.isPresent()) {
-				task.downloadLogger()
-						.info(
-								"Metadata item {} has unlisted_since={} - attempting download",
-								filename,
-								unlistedSince.get());
-			}
-			task.downloadLogger().info("Downloading " + filename);
-			try {
-				httpUtils.downloadFile(url, tempFile);
-			} catch (IOException e) {
-				if (isHttpStatus(e, 403, 404)) {
-					if (unlistedSince.isPresent()) {
-						task.downloadLogger()
-								.warn(
-										"Download returned 40X for unlisted package {} (unlisted_since={}). "
-												+ "This package is most likely not available anymore and is a candidate for pruning.",
-										filename,
-										unlistedSince.get());
-					}
-					if (markMissing && metadata.getMissingSince() == null) {
-						String today = java.time.LocalDate.now().toString();
-						metadata.setMissingSince(today);
-						task.downloadLogger().warn("Marking {} as missing_since={}", filename, today);
-						saveMetadata(task, metadata);
-					}
-				}
-				throw e;
-			}
-
-			long size = Files.size(tempFile);
-
-			// Compute hashes
-			task.downloadLogger().info("Computing hashes for " + filename);
-			String md5 = HashUtils.computeHash(tempFile, "MD5");
-			String sha1 = HashUtils.computeHash(tempFile, "SHA-1");
-			String sha256 = HashUtils.computeHash(tempFile, "SHA-256");
-			String sha512 = HashUtils.computeHash(tempFile, "SHA-512");
-
-			// Save checksum files
-			Path distroChecksumDir = checksumDir.resolve(task.distro);
-			Files.createDirectories(distroChecksumDir);
-			saveChecksumFile(distroChecksumDir, filename, "md5", md5);
-			saveChecksumFile(distroChecksumDir, filename, "sha1", sha1);
-			saveChecksumFile(distroChecksumDir, filename, "sha256", sha256);
-			saveChecksumFile(distroChecksumDir, filename, "sha512", sha512);
-
-			// Update metadata with download results
-			DownloadResult result = new DownloadResult(md5, sha1, sha256, sha512, size);
-			metadata.download(result);
-			if (markMissing && metadata.getMissingSince() != null) {
-				task.downloadLogger().info("Clearing missing_since for {}", filename);
-				metadata.setMissingSince(null);
-			}
-
-			// Extract and parse release info from archive
-			try {
-				task.downloadLogger().info("Extracting release info from " + filename);
-				Map<String, String> releaseInfo = ArchiveUtils.extractReleaseInfo(tempFile, filename);
-				if (releaseInfo != null && !releaseInfo.isEmpty()) {
-					metadata.setReleaseInfo(releaseInfo);
-					task.downloadLogger()
-							.debug("Extracted release info with " + releaseInfo.size() + " properties from "
-									+ filename);
-				} else {
-					metadata.setReleaseInfo(Collections.emptyMap());
-					task.downloadLogger().debug("No release info found in " + filename);
-				}
-			} catch (Exception e) {
-				// Don't fail the download if release extraction fails
-				task.downloadLogger().warn("Failed to extract release info from " + filename, e);
-			}
-
-			// Save metadata file
-			Path metadataFile = saveMetadata(task, metadata);
-
-			// Apply the original file timestamp to the metadata file
-			try {
-				var fileTime = Files.getLastModifiedTime(tempFile);
-				Files.setLastModifiedTime(metadataFile, fileTime);
-			} catch (IOException e) {
-				// Ignore if we can't set the timestamp
-			}
-
-			// Report success
-			task.downloadLogger().info("Processed " + filename);
-		} finally {
-			Files.deleteIfExists(tempFile);
-		}
-	}
-
-	private Path saveMetadata(DownloadTask task, JdkMetadata metadata) throws IOException {
-		Path distroMetadataDir = metadataDir.resolve(task.distro);
-		Files.createDirectories(distroMetadataDir);
-		Path metadataFile = distroMetadataDir.resolve(metadata.metadataFile());
-		MetadataUtils.saveMetadataFile(metadataFile, metadata);
-		return metadataFile;
-	}
-
-	/** Save checksum to file */
-	private void saveChecksumFile(Path checksumDir, String filename, String algorithm, String checksum)
-			throws IOException {
-		Path checksumFile = checksumDir.resolve(filename + "." + algorithm);
-		Files.writeString(checksumFile, checksum + "  " + filename + "\n");
-	}
-
-	private Optional<String> findUnlistedSince(JdkMetadata metadata) {
-		String value = metadata.getUnlistedSince();
-		if (value == null || value.isBlank()) {
-			return Optional.empty();
-		}
-		return Optional.of(value);
-	}
-
-	private boolean isHttpStatus(IOException e, int... statusCodes) {
-		if (!(e instanceof HttpStatusException hse)) {
-			return false;
-		}
-		for (int code : statusCodes) {
-			if (hse.getStatusCode() == code) {
-				return true;
-			}
-		}
-		return false;
-	}
-
 	/**
 	 * Extract the host from a URL.
 	 *
 	 * @param urlString The URL string
 	 * @return The host, or null if the URL is invalid
 	 */
-	private String extractHost(String urlString) {
+	private static String extractHost(String urlString) {
 		if (urlString == null) {
 			return null;
 		}
@@ -500,5 +345,5 @@ public class DefaultDownloadManager implements DownloadManager {
 	}
 
 	/** Internal class representing a download task */
-	private record DownloadTask(JdkMetadata metadata, String distro, Logger downloadLogger) {}
+	public static record DownloadTask(JdkMetadata metadata, String distro, Logger downloadLogger) {}
 }
