@@ -9,6 +9,8 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -77,6 +79,22 @@ public class CleanCommand implements Callable<Integer> {
 	private String pruneUnlisted;
 
 	@Option(
+			names = {"--prune-missing"},
+			arity = "0..1",
+			paramLabel = "SINCE",
+			description =
+					"Prune metadata files with missing_since up to SINCE. SINCE uses duration format [number][d|w|m|y].")
+	private String pruneMissing;
+
+	@Option(
+			names = {"--prune-unlisted-missing"},
+			arity = "0..1",
+			paramLabel = "SINCE",
+			description =
+					"Prune metadata files where both unlisted_since and missing_since are up to SINCE. SINCE uses duration format [number][d|w|m|y].")
+	private String pruneUnlistedMissing;
+
+	@Option(
 			names = {"-p", "--prune-dir"},
 			description = "Directory to move pruned files into (default: db/pruned)",
 			defaultValue = "db/pruned")
@@ -100,6 +118,8 @@ public class CleanCommand implements Callable<Integer> {
 				&& !pruneInvalid
 				&& pruneEa == null
 				&& pruneUnlisted == null
+				&& pruneMissing == null
+				&& pruneUnlistedMissing == null
 				&& !removeOrphanedChecksums
 				&& !dryRun) {
 			logger.info("No options specified, using defaults: --remove-incomplete=all --prune-ea=6m --dry-run");
@@ -121,6 +141,8 @@ public class CleanCommand implements Callable<Integer> {
 		logger.info("  Prune invalid: {}", pruneInvalid);
 		logger.info("  Prune EA: {}", (pruneEa != null ? pruneEa : "disabled"));
 		logger.info("  Prune unlisted: {}", (pruneUnlisted != null ? pruneUnlisted : "disabled"));
+		logger.info("  Prune missing: {}", (pruneMissing != null ? pruneMissing : "disabled"));
+		logger.info("  Prune unlisted+missing: {}", (pruneUnlistedMissing != null ? pruneUnlistedMissing : "disabled"));
 		logger.info("  Remove orphaned checksums: {}", removeOrphanedChecksums);
 		logger.info("  Dry run: {}", dryRun);
 		logger.info("");
@@ -158,12 +180,43 @@ public class CleanCommand implements Callable<Integer> {
 			logger.info("");
 		}
 
+		Instant pruneMissingThreshold = null;
+		if (pruneMissing != null) {
+			Duration duration = MetadataUtils.parseDuration(pruneMissing);
+			if (duration == null) {
+				logger.error("Error: Invalid --prune-missing SINCE value: {}", pruneMissing);
+				logger.error("Expected format: [number][d|w|m|y] (e.g., 30d, 3w, 6m, 1y)");
+				return 1;
+			}
+			pruneMissingThreshold = Instant.now().minus(duration);
+			logger.info("Pruning missing metadata up to: {} (<= {})", pruneMissing, pruneMissingThreshold);
+			logger.info("");
+		}
+
+		Instant pruneUnlistedMissingThreshold = null;
+		if (pruneUnlistedMissing != null) {
+			Duration duration = MetadataUtils.parseDuration(pruneUnlistedMissing);
+			if (duration == null) {
+				logger.error("Error: Invalid --prune-unlisted-missing SINCE value: {}", pruneUnlistedMissing);
+				logger.error("Expected format: [number][d|w|m|y] (e.g., 30d, 3w, 6m, 1y)");
+				return 1;
+			}
+			pruneUnlistedMissingThreshold = Instant.now().minus(duration);
+			logger.info(
+					"Pruning unlisted+missing metadata up to: {} (<= {})",
+					pruneUnlistedMissing,
+					pruneUnlistedMissingThreshold);
+			logger.info("");
+		}
+
 		// Collect files to delete/prune
 		final CleanStats stats = new CleanStats();
 		final List<Path> filesToDelete = new ArrayList<>();
 		final List<Path> filesToPrune = new ArrayList<>();
 		final Instant finalPruneEaThreshold = pruneEaThreshold;
 		final Instant finalPruneUnlistedThreshold = pruneUnlistedThreshold;
+		final Instant finalPruneMissingThreshold = pruneMissingThreshold;
+		final Instant finalPruneUnlistedMissingThreshold = pruneUnlistedMissingThreshold;
 
 		List<JdkMetadata> metadataList = MetadataUtils.collectAllMetadata(distroDir, 2, true, true);
 		for (JdkMetadata metadata : metadataList) {
@@ -174,7 +227,9 @@ public class CleanCommand implements Callable<Integer> {
 						filesToDelete,
 						filesToPrune,
 						finalPruneEaThreshold,
-						finalPruneUnlistedThreshold);
+						finalPruneUnlistedThreshold,
+						finalPruneMissingThreshold,
+						finalPruneUnlistedMissingThreshold);
 			} catch (IOException e) {
 				logger.error("Failed to process {}: {}", metadata.metadataFile().getFileName(), e.getMessage());
 				stats.errors++;
@@ -199,6 +254,8 @@ public class CleanCommand implements Callable<Integer> {
 		logger.info("Invalid files: {}", stats.invalidFiles);
 		logger.info("Old EA releases: {}", stats.oldEaReleases);
 		logger.info("Unlisted releases: {}", stats.unlistedReleases);
+		logger.info("Missing releases: {}", stats.missingReleases);
+		logger.info("Unlisted+missing releases: {}", stats.unlistedMissingReleases);
 		logger.info("Orphaned checksum files: {}", stats.orphanedChecksums);
 		logger.info("Errors: {}", stats.errors);
 		logger.info("");
@@ -275,7 +332,9 @@ public class CleanCommand implements Callable<Integer> {
 			List<Path> filesToDelete,
 			List<Path> filesToPrune,
 			Instant pruneEaThreshold,
-			Instant pruneUnlistedThreshold)
+			Instant pruneUnlistedThreshold,
+			Instant pruneMissingThreshold,
+			Instant pruneUnlistedMissingThreshold)
 			throws IOException {
 		stats.totalFiles++;
 
@@ -338,11 +397,35 @@ public class CleanCommand implements Callable<Integer> {
 
 		if (pruneUnlistedThreshold != null && !shouldDelete) {
 			String unlistedSince = metadata.getUnlistedSince();
-			if (matchesUnlistedSince(unlistedSince, pruneUnlistedThreshold)) {
+			if (matchesSince(unlistedSince, pruneUnlistedThreshold)) {
 				stats.unlistedReleases++;
 				if (!shouldPrune) {
 					shouldPrune = true;
 					reason = "unlisted since " + unlistedSince;
+				}
+			}
+		}
+
+		if (pruneMissingThreshold != null && !shouldDelete) {
+			String missingSince = metadata.getMissingSince();
+			if (matchesSince(missingSince, pruneMissingThreshold)) {
+				stats.missingReleases++;
+				if (!shouldPrune) {
+					shouldPrune = true;
+					reason = "missing since " + missingSince;
+				}
+			}
+		}
+
+		if (pruneUnlistedMissingThreshold != null && !shouldDelete) {
+			String unlistedSince = metadata.getUnlistedSince();
+			String missingSince = metadata.getMissingSince();
+			if (matchesSince(unlistedSince, pruneUnlistedMissingThreshold)
+					&& matchesSince(missingSince, pruneUnlistedMissingThreshold)) {
+				stats.unlistedMissingReleases++;
+				if (!shouldPrune) {
+					shouldPrune = true;
+					reason = "unlisted since " + unlistedSince + " and missing since " + missingSince;
 				}
 			}
 		}
@@ -436,16 +519,24 @@ public class CleanCommand implements Callable<Integer> {
 		}
 	}
 
-	private boolean matchesUnlistedSince(String unlistedSince, Instant threshold) {
-		if (unlistedSince == null || unlistedSince.isBlank()) {
+	private boolean matchesSince(String since, Instant threshold) {
+		if (since == null || since.isBlank()) {
 			return false;
 		}
 
-		String value = unlistedSince.trim();
+		String value = since.trim();
 		try {
 			return !Instant.parse(value).isAfter(threshold);
 		} catch (RuntimeException ignored) {
-			logger.debug("Ignoring metadata with non-instant unlisted_since value: {}", value);
+			// fall through
+		}
+		try {
+			return !LocalDate.parse(value)
+					.atStartOfDay(ZoneOffset.UTC)
+					.toInstant()
+					.isAfter(threshold);
+		} catch (RuntimeException ignored) {
+			logger.debug("Ignoring metadata with unparseable since value: {}", value);
 			return false;
 		}
 	}
@@ -538,6 +629,8 @@ public class CleanCommand implements Callable<Integer> {
 		int invalidFiles = 0;
 		int oldEaReleases = 0;
 		int unlistedReleases = 0;
+		int missingReleases = 0;
+		int unlistedMissingReleases = 0;
 		int orphanedChecksums = 0;
 		int errors = 0;
 	}

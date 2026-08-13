@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -132,12 +133,160 @@ class CleanCommandTest {
 		assertThat(pruneRoot.resolve("temurin/invalid.json")).exists();
 	}
 
+	@Test
+	void pruneMissingWithInvalidSinceReturnsError() {
+		int exit = new CommandLine(new CleanCommand()).execute("--prune-missing", "not-a-date");
+
+		assertThat(exit).isEqualTo(1);
+	}
+
+	@Test
+	void pruneMissingWithDateOnlyStringPrunesCorrectly() throws Exception {
+		Path metadataRoot = tempDir.resolve("metadata");
+		Path checksumRoot = tempDir.resolve("checksums");
+		Path pruneRoot = tempDir.resolve("pruned");
+		Path distroMetadata = metadataRoot.resolve("temurin");
+		Files.createDirectories(distroMetadata);
+		Files.createDirectories(checksumRoot.resolve("temurin"));
+
+		// Date-only format (no time component) as produced by the download manager
+		String oldDate = LocalDate.now().minusDays(10).toString();
+		String recentDate = LocalDate.now().minusDays(2).toString();
+
+		Path oldMissing = distroMetadata.resolve("old-missing.json");
+		Path recentMissing = distroMetadata.resolve("recent-missing.json");
+		Files.writeString(oldMissing, metadataJson("temurin", "old-missing", null, oldDate));
+		Files.writeString(recentMissing, metadataJson("temurin", "recent-missing", null, recentDate));
+
+		int exit = new CommandLine(new CleanCommand())
+				.execute(
+						"--metadata-dir",
+						metadataRoot.toString(),
+						"--checksum-dir",
+						checksumRoot.toString(),
+						"--prune-dir",
+						pruneRoot.toString(),
+						"--prune-missing",
+						"5d");
+
+		assertThat(exit).isZero();
+		assertThat(oldMissing).doesNotExist();
+		assertThat(pruneRoot.resolve("temurin/old-missing.json")).exists();
+		assertThat(recentMissing).exists();
+	}
+
+	@Test
+	void pruneMissingWithDurationOnlyPrunesOlderMarkers() throws Exception {
+		Path metadataRoot = tempDir.resolve("metadata");
+		Path checksumRoot = tempDir.resolve("checksums");
+		Path pruneRoot = tempDir.resolve("pruned");
+		Path distroMetadata = metadataRoot.resolve("temurin");
+		Files.createDirectories(distroMetadata);
+		Files.createDirectories(checksumRoot.resolve("temurin"));
+
+		String oldDate = Instant.now()
+				.minus(10, ChronoUnit.DAYS)
+				.truncatedTo(ChronoUnit.SECONDS)
+				.toString();
+		String recentDate = Instant.now()
+				.minus(2, ChronoUnit.DAYS)
+				.truncatedTo(ChronoUnit.SECONDS)
+				.toString();
+
+		Path oldMissing = distroMetadata.resolve("old-missing.json");
+		Path recentMissing = distroMetadata.resolve("recent-missing.json");
+		Path notMissing = distroMetadata.resolve("not-missing.json");
+		Files.writeString(oldMissing, metadataJson("temurin", "old-missing", null, oldDate));
+		Files.writeString(recentMissing, metadataJson("temurin", "recent-missing", null, recentDate));
+		Files.writeString(notMissing, metadataJson("temurin", "not-missing", null, null));
+
+		int exit = new CommandLine(new CleanCommand())
+				.execute(
+						"--metadata-dir",
+						metadataRoot.toString(),
+						"--checksum-dir",
+						checksumRoot.toString(),
+						"--prune-dir",
+						pruneRoot.toString(),
+						"--prune-missing",
+						"5d");
+
+		assertThat(exit).isZero();
+		assertThat(oldMissing).doesNotExist();
+		assertThat(pruneRoot.resolve("temurin/old-missing.json")).exists();
+		assertThat(recentMissing).exists();
+		assertThat(notMissing).exists();
+	}
+
+	@Test
+	void pruneUnlistedMissingWithInvalidSinceReturnsError() {
+		int exit = new CommandLine(new CleanCommand()).execute("--prune-unlisted-missing", "not-a-date");
+
+		assertThat(exit).isEqualTo(1);
+	}
+
+	@Test
+	void pruneUnlistedMissingOnlyPrunesWhenBothMatch() throws Exception {
+		Path metadataRoot = tempDir.resolve("metadata");
+		Path checksumRoot = tempDir.resolve("checksums");
+		Path pruneRoot = tempDir.resolve("pruned");
+		Path distroMetadata = metadataRoot.resolve("temurin");
+		Files.createDirectories(distroMetadata);
+		Files.createDirectories(checksumRoot.resolve("temurin"));
+
+		String oldDate = Instant.now()
+				.minus(10, ChronoUnit.DAYS)
+				.truncatedTo(ChronoUnit.SECONDS)
+				.toString();
+		String recentDate = Instant.now()
+				.minus(2, ChronoUnit.DAYS)
+				.truncatedTo(ChronoUnit.SECONDS)
+				.toString();
+
+		// Both unlisted_since and missing_since are old -> should be pruned
+		Path bothOld = distroMetadata.resolve("both-old.json");
+		// Only unlisted_since is old -> should NOT be pruned
+		Path onlyUnlisted = distroMetadata.resolve("only-unlisted.json");
+		// Only missing_since is old -> should NOT be pruned
+		Path onlyMissing = distroMetadata.resolve("only-missing.json");
+		// Both are recent -> should NOT be pruned
+		Path bothRecent = distroMetadata.resolve("both-recent.json");
+
+		Files.writeString(bothOld, metadataJson("temurin", "both-old", oldDate, oldDate));
+		Files.writeString(onlyUnlisted, metadataJson("temurin", "only-unlisted", oldDate, recentDate));
+		Files.writeString(onlyMissing, metadataJson("temurin", "only-missing", recentDate, oldDate));
+		Files.writeString(bothRecent, metadataJson("temurin", "both-recent", recentDate, recentDate));
+
+		int exit = new CommandLine(new CleanCommand())
+				.execute(
+						"--metadata-dir",
+						metadataRoot.toString(),
+						"--checksum-dir",
+						checksumRoot.toString(),
+						"--prune-dir",
+						pruneRoot.toString(),
+						"--prune-unlisted-missing",
+						"5d");
+
+		assertThat(exit).isZero();
+		assertThat(bothOld).doesNotExist();
+		assertThat(pruneRoot.resolve("temurin/both-old.json")).exists();
+		assertThat(onlyUnlisted).exists();
+		assertThat(onlyMissing).exists();
+		assertThat(bothRecent).exists();
+	}
+
 	private String metadataJson(String distro, String filename, String unlistedSince) {
+		return metadataJson(distro, filename, unlistedSince, null);
+	}
+
+	private String metadataJson(String distro, String filename, String unlistedSince, String missingSince) {
 		String unlisted = unlistedSince == null ? "" : "\n  \"unlisted_since\": \"" + unlistedSince + "\",";
+		String missing = missingSince == null ? "" : "\n  \"missing_since\": \"" + missingSince + "\",";
 		return """
 				{
 				\"distro\": \"%s\",
-				\"filename\": \"%s\",%s
+				\"filename\": \"%s\",%s%s
 				\"version\": \"21.0.1\",
 				\"java_version\": \"21\",
 				\"release_type\": \"ga\",
@@ -148,6 +297,6 @@ class CleanCommandTest {
 				\"image_type\": \"jdk\",
 				\"url\": \"https://example.com/%s.tar.gz\"
 				}
-				""".formatted(distro, filename, unlisted, filename);
+				""".formatted(distro, filename, unlisted, missing, filename);
 	}
 }
