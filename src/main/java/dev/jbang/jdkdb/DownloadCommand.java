@@ -426,9 +426,9 @@ public class DownloadCommand implements Callable<Integer> {
 						metadata.setReleaseInfo(Collections.emptyMap());
 						task.downloadLogger().debug("No release info found in " + filename);
 					}
-				} catch (Exception e) {
+				} catch (Throwable th) {
 					// Don't fail the download if release extraction fails
-					task.downloadLogger().warn("Failed to extract release info from " + filename, e);
+					task.downloadLogger().warn("Failed to extract release info from " + filename, th);
 				}
 
 				// Save metadata file
