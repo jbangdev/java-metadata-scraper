@@ -25,6 +25,7 @@ dependencies {
 
 	// Archive handling (for extracting release files from JDK archives)
 	implementation "org.apache.commons:commons-compress:1.27.1"
+	implementation "org.tukaani:xz:1.10"
 
 	// Testing
 	testImplementation "org.junit.jupiter:junit-jupiter:5.10.1"
