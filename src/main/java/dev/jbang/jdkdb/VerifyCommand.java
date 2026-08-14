@@ -4,13 +4,9 @@ import dev.jbang.jdkdb.model.JdkMetadata;
 import dev.jbang.jdkdb.scraper.DefaultDownloadManager;
 import dev.jbang.jdkdb.scraper.DefaultDownloadManager.DownloadTask;
 import dev.jbang.jdkdb.scraper.DownloadManager;
-import dev.jbang.jdkdb.scraper.DownloadResult;
 import dev.jbang.jdkdb.scraper.InterruptedProgressException;
 import dev.jbang.jdkdb.scraper.NoOpDownloadManager;
-import dev.jbang.jdkdb.util.ArchiveUtils;
 import dev.jbang.jdkdb.util.GitHubUtils;
-import dev.jbang.jdkdb.util.HashUtils;
-import dev.jbang.jdkdb.util.HttpStatusException;
 import dev.jbang.jdkdb.util.HttpUtils;
 import dev.jbang.jdkdb.util.MetadataUtils;
 import java.io.IOException;
@@ -18,12 +14,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
@@ -31,12 +29,12 @@ import org.slf4j.LoggerFactory;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
-/** Download command to download missing checksums for existing metadata files */
+/** Verify command to check that metadata download URLs are still valid */
 @Command(
-		name = "download",
-		description = "Download and compute checksums for metadata files that have missing checksum values",
+		name = "verify",
+		description = "Verifies that metadata download URLs are still valid",
 		mixinStandardHelpOptions = true)
-public class DownloadCommand implements Callable<Integer> {
+public class VerifyCommand implements Callable<Integer> {
 	private static final Logger logger = LoggerFactory.getLogger("command");
 
 	@Option(
@@ -113,7 +111,7 @@ public class DownloadCommand implements Callable<Integer> {
 		Set<JdkMetadata.FileType> fileTypeFilter =
 				JdkMetadata.processFileTypeFilter(includeFileTypes, excludeFileTypes);
 
-		logger.info("Java Metadata Scraper - Download");
+		logger.info("Java Metadata Scraper - Verify");
 		logger.info("=================================");
 		logger.info("Metadata directory: {}", metadataDir.toAbsolutePath());
 		logger.info("Checksum directory: {}", checksumDir.toAbsolutePath());
@@ -145,40 +143,24 @@ public class DownloadCommand implements Callable<Integer> {
 
 		// Create download manager
 		var threadCount = maxThreads > 0 ? maxThreads : Runtime.getRuntime().availableProcessors();
+		VerifyProcessor verifyProcessor = new VerifyProcessor(new HttpUtils(), metadataDir, markMissing);
 		DownloadManager downloadManager = statsOnly
 				? new NoOpDownloadManager(fileTypeFilter)
-				: new DefaultDownloadManager(
-						threadCount,
-						3,
-						limitTotal,
-						fileTypeFilter,
-						new DownloadProcessor(new HttpUtils(), metadataDir, checksumDir, markMissing));
+				: new DefaultDownloadManager(threadCount, 3, limitTotal, fileTypeFilter, verifyProcessor);
 		downloadManager.start();
 		if (fileTypeFilter != null) {
 			logger.info("File type filter enabled: {}", fileTypeFilter);
 		}
 
-		List<JdkMetadata> metadataList = MetadataUtils.collectAllMetadata(distroDir, 2, false, true).stream()
-				// Don't try to download macOS PKG files if the only thing we need is
-				// the release info, since we won't be able to extract it on non-macOS
-				// platforms anyway!
-				.filter(m -> !"macosx".equals(m.getOs())
-						|| !MetadataUtils.MACOS_FILE_TYPES.contains(m.fileTypeEnum())
-						|| MetadataUtils.hasMissingChecksums(m)
-						|| !MetadataUtils.hasMissingReleaseInfo(m)
-						|| ArchiveUtils.isMacOS())
-				// The same goes for Windows EXE files - but in this case we always
-				// ignore missing release info since we can't extract it from them
-				// on any platform!
-				.filter(m -> !"windows".equals(m.getOs())
-						|| !"exe".equals(m.getFileType())
-						|| MetadataUtils.hasMissingChecksums(m)
-						|| !MetadataUtils.hasMissingReleaseInfo(m))
+		List<JdkMetadata> metadataList = MetadataUtils.collectAllMetadata(distroDir, 2, true, false).stream()
+				.filter(md -> md.getMissingSince() == null) // Don't process items marked as missing
+				.filter(md -> md.getLastVerified()
+						== null) // Don't process items that have been verified (TODO introduce flag to configure this)
 				.collect(Collectors.toCollection(ArrayList::new));
 
-		metadataList = prioritizeMetadata(metadataList, randomize);
+		metadataList = prioritizeUnlistedEa(metadataList, randomize);
 		if (randomize) {
-			logger.info("Randomized download order (preserving checksum-first priority)");
+			logger.info("Randomized download order (preserving unlisted-first priority)");
 		}
 
 		Map<String, Integer> distroMissingCounts = new HashMap<>();
@@ -259,52 +241,65 @@ public class DownloadCommand implements Callable<Integer> {
 						});
 			}
 
-			int filesWithMissingChecksums = (int) metadataList.stream()
-					.filter(MetadataUtils::hasMissingChecksums)
-					.count();
-			int filesWithMissingReleaseInfo = (int) metadataList.stream()
-					.filter(m -> MetadataUtils.hasMissingReleaseInfo(m))
-					.count();
 			logger.info("");
-			logger.info("Files with missing checksums: {}", filesWithMissingChecksums);
-			logger.info("Files with missing release info: {}", filesWithMissingReleaseInfo);
 			logger.info("Total downloads completed: {}", totalCompleted);
 			logger.info("Total downloads failed: {}", totalFailed);
+			if (!statsOnly) {
+				logger.info("Items marked last_verified: {}", verifyProcessor.getVerifiedCount());
+				logger.info("Items marked missing_since: {}", verifyProcessor.getMarkedMissingCount());
+			}
 		}
 
 		return totalCompleted > 0 ? 0 : 1;
 	}
 
-	static List<JdkMetadata> prioritizeMetadata(List<JdkMetadata> metadataList, boolean randomize) {
-		List<JdkMetadata> missingChecksums = metadataList.stream()
-				.filter(MetadataUtils::hasMissingChecksums)
-				.collect(Collectors.toCollection(ArrayList::new));
-		List<JdkMetadata> missingReleaseInfoOnly = metadataList.stream()
-				.filter(m -> !MetadataUtils.hasMissingChecksums(m) && MetadataUtils.hasMissingReleaseInfo(m))
-				.collect(Collectors.toCollection(ArrayList::new));
+	static List<JdkMetadata> prioritizeUnlistedEa(List<JdkMetadata> metadataList, boolean randomize) {
+		List<JdkMetadata> ordered = new ArrayList<>(metadataList.size());
+		ordered.addAll(metadataList);
+		Comparator<JdkMetadata> priorityComparator = Comparator.comparing((metadata) -> !hasUnlistedSince(metadata));
+		priorityComparator =
+				priorityComparator.thenComparing(metadata -> "ea".equalsIgnoreCase(metadata.getReleaseType()) ? 0 : 1);
+		ordered.sort(priorityComparator);
 
 		if (randomize) {
-			Collections.shuffle(missingChecksums);
-			Collections.shuffle(missingReleaseInfoOnly);
+			int groupStart = 0;
+			while (groupStart < ordered.size()) {
+				int groupEnd = groupStart + 1;
+				while (groupEnd < ordered.size()
+						&& priorityComparator.compare(ordered.get(groupStart), ordered.get(groupEnd)) == 0) {
+					groupEnd++;
+				}
+				Collections.shuffle(ordered.subList(groupStart, groupEnd));
+				groupStart = groupEnd;
+			}
 		}
-
-		List<JdkMetadata> ordered = new ArrayList<>(metadataList.size());
-		ordered.addAll(missingChecksums);
-		ordered.addAll(missingReleaseInfoOnly);
 		return ordered;
 	}
 
-	public static class DownloadProcessor implements DefaultDownloadManager.DownloadProcessor {
+	private static boolean hasUnlistedSince(JdkMetadata metadata) {
+		String unlistedSince = metadata.getUnlistedSince();
+		return unlistedSince != null && !unlistedSince.isBlank();
+	}
+
+	public static class VerifyProcessor implements DefaultDownloadManager.DownloadProcessor {
 		private final HttpUtils httpUtils;
 		private final Path metadataDir;
-		private final Path checksumDir;
 		private final boolean markMissing;
+		private final AtomicInteger verifiedCount = new AtomicInteger(0);
+		private final AtomicInteger markedMissingCount = new AtomicInteger(0);
 
-		public DownloadProcessor(HttpUtils httpUtils, Path metadataDir, Path checksumDir, boolean markMissing) {
+		public VerifyProcessor(HttpUtils httpUtils, Path metadataDir, boolean markMissing) {
 			this.httpUtils = httpUtils;
 			this.metadataDir = metadataDir;
-			this.checksumDir = checksumDir;
 			this.markMissing = markMissing;
+		}
+
+		public int getVerifiedCount() {
+			return verifiedCount.get();
+		}
+
+		public int getMarkedMissingCount() {
+			return markedMissingCount.get();
 		}
 
 		/** Process a single download task */
@@ -323,97 +318,42 @@ public class DownloadCommand implements Callable<Integer> {
 				return;
 			}
 
-			Path tempFile = Files.createTempFile("jdk-metadata-", "-" + filename);
-
-			try {
-				if (metadata.getUnlistedSince() != null) {
-					task.downloadLogger()
-							.info(
-									"Metadata item {} has unlisted_since={} - attempting download",
-									filename,
-									metadata.getUnlistedSince());
-				}
-				task.downloadLogger().info("Downloading " + filename);
-				try {
-					httpUtils.downloadFile(url, tempFile);
-				} catch (IOException e) {
-					if (isHttpStatus(e, 403, 404)) {
-						if (metadata.getUnlistedSince() != null) {
-							task.downloadLogger()
-									.warn(
-											"Download returned 40X for unlisted package {} (unlisted_since={}). "
-													+ "This package is most likely not available anymore and is a candidate for pruning.",
-											filename,
-											metadata.getUnlistedSince());
-						}
-						if (markMissing && metadata.getMissingSince() == null) {
-							metadata.setMissingSince(today);
-							task.downloadLogger().warn("Marking {} as missing_since={}", filename, today);
-							saveMetadata(task, metadataDir, metadata);
-						}
-					}
-					throw e;
-				}
-
-				long size = Files.size(tempFile);
-
-				// Compute hashes
-				task.downloadLogger().info("Computing hashes for " + filename);
-				String md5 = HashUtils.computeHash(tempFile, "MD5");
-				String sha1 = HashUtils.computeHash(tempFile, "SHA-1");
-				String sha256 = HashUtils.computeHash(tempFile, "SHA-256");
-				String sha512 = HashUtils.computeHash(tempFile, "SHA-512");
-
-				// Save checksum files
-				Path distroChecksumDir = checksumDir.resolve(task.distro());
-				Files.createDirectories(distroChecksumDir);
-				saveChecksumFile(distroChecksumDir, filename, "md5", md5);
-				saveChecksumFile(distroChecksumDir, filename, "sha1", sha1);
-				saveChecksumFile(distroChecksumDir, filename, "sha256", sha256);
-				saveChecksumFile(distroChecksumDir, filename, "sha512", sha512);
-
-				// Update metadata with download results
-				DownloadResult result = new DownloadResult(md5, sha1, sha256, sha512, size);
-				metadata.download(result);
+			if (metadata.getUnlistedSince() != null) {
+				task.downloadLogger()
+						.info(
+								"Metadata item {} has unlisted_since={} - attempting download",
+								filename,
+								metadata.getUnlistedSince());
+			}
+			task.downloadLogger().info("Downloading " + filename);
+			int status = httpUtils.urlStatus(url);
+			if (status >= 200 && status < 300) {
 				if (markMissing && metadata.getMissingSince() != null) {
 					task.downloadLogger().info("Clearing missing_since for {}", filename);
 					metadata.setMissingSince(null);
 				}
 				metadata.setLastVerified(today);
-
-				// Extract and parse release info from archive
-				try {
-					task.downloadLogger().info("Extracting release info from " + filename);
-					Map<String, String> releaseInfo = ArchiveUtils.extractReleaseInfo(tempFile, filename);
-					if (releaseInfo != null && !releaseInfo.isEmpty()) {
-						metadata.setReleaseInfo(releaseInfo);
-						task.downloadLogger()
-								.debug("Extracted release info with " + releaseInfo.size() + " properties from "
-										+ filename);
-					} else {
-						metadata.setReleaseInfo(Collections.emptyMap());
-						task.downloadLogger().debug("No release info found in " + filename);
-					}
-				} catch (Throwable th) {
-					// Don't fail the download if release extraction fails
-					task.downloadLogger().warn("Failed to extract release info from " + filename, th);
-				}
-
-				// Save metadata file
-				Path metadataFile = saveMetadata(task, metadataDir, metadata);
-
-				// Apply the original file timestamp to the metadata file
-				try {
-					var fileTime = Files.getLastModifiedTime(tempFile);
-					Files.setLastModifiedTime(metadataFile, fileTime);
-				} catch (IOException e) {
-					// Ignore if we can't set the timestamp
-				}
-
+				saveMetadata(task, metadataDir, metadata);
+				verifiedCount.incrementAndGet();
 				// Report success
-				task.downloadLogger().info("Processed " + filename);
-			} finally {
-				Files.deleteIfExists(tempFile);
+				task.downloadLogger().info("Verification successful for {}", filename);
+			} else if (status == 403 || status == 404) {
+				if (metadata.getUnlistedSince() != null) {
+					task.downloadLogger()
+							.warn(
+									"Download returned 40X for unlisted package {} (unlisted_since={}). "
+											+ "This package is most likely not available anymore and is a candidate for pruning.",
+									filename,
+									metadata.getUnlistedSince());
+				}
+				if (markMissing && metadata.getMissingSince() == null) {
+					metadata.setMissingSince(today);
+					task.downloadLogger().warn("Marking {} as missing_since={}", filename, today);
+					saveMetadata(task, metadataDir, metadata);
+					markedMissingCount.incrementAndGet();
+				}
+			} else {
+				throw new IOException("Download failed with HTTP status: " + status);
 			}
 		}
 
@@ -423,25 +363,6 @@ public class DownloadCommand implements Callable<Integer> {
 			Path metadataFile = distroMetadataDir.resolve(metadata.metadataFile());
 			MetadataUtils.saveMetadataFile(metadataFile, metadata);
 			return metadataFile;
-		}
-
-		/** Save checksum to file */
-		private static void saveChecksumFile(Path checksumDir, String filename, String algorithm, String checksum)
-				throws IOException {
-			Path checksumFile = checksumDir.resolve(filename + "." + algorithm);
-			Files.writeString(checksumFile, checksum + "  " + filename + "\n");
-		}
-
-		private static boolean isHttpStatus(IOException e, int... statusCodes) {
-			if (!(e instanceof HttpStatusException hse)) {
-				return false;
-			}
-			for (int code : statusCodes) {
-				if (hse.getStatusCode() == code) {
-					return true;
-				}
-			}
-			return false;
 		}
 	}
 }
