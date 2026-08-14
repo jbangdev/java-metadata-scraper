@@ -16,6 +16,7 @@ import picocli.CommandLine.Command;
 			UpdateCommand.class,
 			IndexCommand.class,
 			DownloadCommand.class,
+			VerifyCommand.class,
 			CleanCommand.class,
 			ConvertCommand.class
 		})

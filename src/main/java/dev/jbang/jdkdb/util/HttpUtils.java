@@ -86,16 +86,15 @@ public class HttpUtils {
 	}
 
 	/** Check if a URL exists (returns 2xx status code) */
-	public boolean urlExists(String url) {
+	public int urlStatus(String url) {
 		try {
 			HttpRequest request = request(url)
 					.method("HEAD", HttpRequest.BodyPublishers.noBody())
 					.build();
 			HttpResponse<Void> response = httpClient.send(request, HttpResponse.BodyHandlers.discarding());
-			int statusCode = response.statusCode();
-			return statusCode >= 200 && statusCode < 300;
+			return response.statusCode();
 		} catch (IOException | InterruptedException e) {
-			return false;
+			return -1;
 		}
 	}
 

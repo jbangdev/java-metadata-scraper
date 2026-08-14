@@ -7,9 +7,11 @@ import dev.jbang.jdkdb.scraper.DownloadResult;
 import dev.jbang.jdkdb.util.MetadataUtils;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -145,6 +147,10 @@ public class JdkMetadata {
 	@JsonProperty("missing_since")
 	@JsonInclude(JsonInclude.Include.NON_NULL)
 	private String missingSince;
+
+	@JsonProperty("last_verified")
+	@JsonInclude(JsonInclude.Include.NON_NULL)
+	private String lastVerified;
 
 	@JsonIgnore
 	private transient Path metadataFile;
@@ -378,6 +384,15 @@ public class JdkMetadata {
 		return this;
 	}
 
+	public String getLastVerified() {
+		return lastVerified;
+	}
+
+	public JdkMetadata setLastVerified(String lastVerified) {
+		this.lastVerified = lastVerified;
+		return this;
+	}
+
 	public Path metadataFile() {
 		if (metadataFile == null && filename != null) {
 			return Path.of(filename + ".json");
@@ -465,6 +480,37 @@ public class JdkMetadata {
 			return false;
 		}
 		return true;
+	}
+
+	/**
+	 * Process the include and exclude file type options to create a filter set.
+	 *
+	 * @param includeFileTypes List of file types to include (null or empty means include all)
+	 * @param excludeFileTypes List of file types to exclude (null or empty means exclude none)
+	 * @return A set of file types to accept, or null if no filtering should be applied
+	 */
+	public static Set<FileType> processFileTypeFilter(
+			List<FileType> includeFileTypes, List<FileType> excludeFileTypes) {
+		if ((includeFileTypes == null || includeFileTypes.isEmpty())
+				&& (excludeFileTypes == null || excludeFileTypes.isEmpty())) {
+			return null; // No filtering
+		}
+
+		Set<FileType> result;
+		if (includeFileTypes != null && !includeFileTypes.isEmpty()) {
+			// Start with only the included types
+			result = EnumSet.copyOf(includeFileTypes);
+		} else {
+			// Start with all types
+			result = EnumSet.allOf(FileType.class);
+		}
+
+		// Remove excluded types
+		if (excludeFileTypes != null && !excludeFileTypes.isEmpty()) {
+			result.removeAll(excludeFileTypes);
+		}
+
+		return result.isEmpty() ? null : result;
 	}
 
 	@Override

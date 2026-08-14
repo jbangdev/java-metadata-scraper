@@ -41,8 +41,6 @@ public class DefaultDownloadManager implements DownloadManager {
 	 * Create a new DefaultDownloadManager.
 	 *
 	 * @param threadCount Number of parallel download threads
-	 * @param metadataDir The directory to save metadata files
-	 * @param checksumDir The directory to save checksum files
 	 * @param maxDownloadsPerHost Maximum number of concurrent downloads per host (default: 3)
 	 * @param limitTotal Maximum number of total downloads to accept (-1 for unlimited)
 	 * @param fileTypeFilter Set of file types to accept (null to accept all)
