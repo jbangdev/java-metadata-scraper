@@ -228,6 +228,9 @@ public class DefaultDownloadManager implements DownloadManager {
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
 				break;
+			} catch (Throwable t) {
+				logger.error("Unexpected error in download worker thread", t);
+				// Continue processing other downloads despite the error
 			}
 		}
 	}
@@ -267,12 +270,12 @@ public class DefaultDownloadManager implements DownloadManager {
 					.computeIfAbsent(task.distro, k -> new AtomicInteger(0))
 					.incrementAndGet();
 			logger.debug("Succeeded download for {} [{}]", task.metadata.getFilename(), task.distro);
-		} catch (Exception e) {
+		} catch (Throwable t) {
 			failedDownloads.incrementAndGet();
 			failedPerDistro
 					.computeIfAbsent(task.distro, k -> new AtomicInteger(0))
 					.incrementAndGet();
-			task.downloadLogger().error("Failed to download {}", task.metadata.getFilename(), e);
+			task.downloadLogger().error("Failed to download {}", task.metadata.getFilename(), t);
 			logger.debug("Failed download for {} [{}]", task.metadata.getFilename(), task.distro);
 		} finally {
 			activeDownloads.decrementAndGet();
