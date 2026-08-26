@@ -2,7 +2,9 @@ package dev.jbang.jdkdb.util;
 
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import com.fasterxml.jackson.core.JsonGenerator;
-import com.fasterxml.jackson.core.util.MinimalPrettyPrinter;
+import com.fasterxml.jackson.core.util.DefaultIndenter;
+import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
+import com.fasterxml.jackson.core.util.Separators;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -53,86 +55,17 @@ public class MetadataUtils {
 	private static final Pattern DURATION_PATTERN = Pattern.compile("^(\\d+)([dwmy])$");
 	private static final Pattern VERSION_PATTERN = Pattern.compile("^(?:1\\.)?(\\d+)");
 
-	// Custom pretty printer with proper formatting
-	private static MinimalPrettyPrinter printer = new MinimalPrettyPrinter() {
-		private int depth = 0;
-
-		private void indent(JsonGenerator g) throws IOException {
-			g.writeRaw("\n");
-			for (int i = 0; i < depth; i++) {
-				g.writeRaw("  ");
-			}
-		}
-
-		@Override
-		public void writeStartArray(JsonGenerator g) throws IOException {
-			g.writeRaw('[');
-			depth++;
-		}
-
-		@Override
-		public void beforeArrayValues(JsonGenerator g) throws IOException {
-			indent(g);
-		}
-
-		@Override
-		public void writeArrayValueSeparator(JsonGenerator g) throws IOException {
-			g.writeRaw(',');
-			indent(g);
-		}
-
-		@Override
-		public void writeEndArray(JsonGenerator g, int nrOfValues) throws IOException {
-			depth--;
-			if (nrOfValues > 0) {
-				indent(g);
-			}
-			g.writeRaw(']');
-		}
-
-		@Override
-		public void writeStartObject(JsonGenerator g) throws IOException {
-			g.writeRaw('{');
-			depth++;
-		}
-
-		@Override
-		public void beforeObjectEntries(JsonGenerator g) throws IOException {
-			indent(g);
-		}
-
-		@Override
-		public void writeObjectFieldValueSeparator(JsonGenerator g) throws IOException {
-			g.writeRaw(": ");
-		}
-
-		@Override
-		public void writeObjectEntrySeparator(JsonGenerator g) throws IOException {
-			g.writeRaw(',');
-			indent(g);
-		}
-
-		@Override
-		public void writeEndObject(JsonGenerator g, int nrOfEntries) throws IOException {
-			depth--;
-			if (nrOfEntries > 0) {
-				indent(g);
-			}
-			g.writeRaw('}');
-		}
-	};
-
-	static {
-		printer.setRootValueSeparator("\n");
-	}
-
 	// Use a mix-in to override the JsonPropertyOrder annotation
 	private static ObjectMapper writeMapper = JsonMapper.builder()
 			.configure(JsonGenerator.Feature.AUTO_CLOSE_TARGET, false)
 			.enable(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY)
 			.enable(SerializationFeature.INDENT_OUTPUT)
 			.enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
-			.defaultPrettyPrinter(printer)
+			.defaultPrettyPrinter(new DefaultPrettyPrinter()
+					.withObjectIndenter(new DefaultIndenter("  ", "\n"))
+					.withArrayIndenter(new DefaultIndenter("  ", "\n"))
+					.withSeparators(
+							Separators.createDefaultInstance().withObjectFieldValueSpacing(Separators.Spacing.AFTER)))
 			.build();
 
 	// Add a mix-in to override the @JsonPropertyOrder annotation

@@ -53,7 +53,7 @@ class MetadataUtilsTest {
     "checksum": "741a6df853edecfadd81b4a389271eb937c2626a",
     "checksum_type": "sha1",
     "distro": "microsoft",
-    "features": [],
+    "features": [ ],
     "file_type": "tar.gz",
     "filename": "microsoft-jdk-25.0.2-macos-x64.tar.gz",
     "image_type": "jdk",
