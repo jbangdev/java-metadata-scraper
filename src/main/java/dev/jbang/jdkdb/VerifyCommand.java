@@ -220,7 +220,7 @@ public class VerifyCommand implements Callable<Integer> {
 
 		logger.info("Summary");
 		logger.info("=======");
-		logger.info("Files with missing data: {}", filesWithMissingData);
+		logger.info("Items pending verification (no last_verified): {}", filesWithMissingData);
 		if (filesWithMissingData > 0) {
 			// Per-distro breakdown
 			Map<String, DownloadManager.DistroStats> distroStats = downloadManager.getDistroStats();
