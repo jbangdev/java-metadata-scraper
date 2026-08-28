@@ -2,7 +2,6 @@ package dev.jbang.jdkdb;
 
 import dev.jbang.jdkdb.model.JdkMetadata;
 import dev.jbang.jdkdb.scraper.DefaultDownloadManager;
-import dev.jbang.jdkdb.scraper.DefaultDownloadManager.DownloadTask;
 import dev.jbang.jdkdb.scraper.DownloadManager;
 import dev.jbang.jdkdb.scraper.DownloadResult;
 import dev.jbang.jdkdb.scraper.InterruptedProgressException;
@@ -147,12 +146,15 @@ public class DownloadCommand implements Callable<Integer> {
 		var threadCount = maxThreads > 0 ? maxThreads : Runtime.getRuntime().availableProcessors();
 		DownloadManager downloadManager = statsOnly
 				? new NoOpDownloadManager(fileTypeFilter)
-				: new DefaultDownloadManager(
+				: new CommandDownloadManager(
 						threadCount,
 						3,
 						limitTotal,
 						fileTypeFilter,
-						new DownloadProcessor(new HttpUtils(), metadataDir, checksumDir, markMissing));
+						new HttpUtils(),
+						metadataDir,
+						checksumDir,
+						markMissing);
 		downloadManager.start();
 		if (fileTypeFilter != null) {
 			logger.info("File type filter enabled: {}", fileTypeFilter);
@@ -241,7 +243,7 @@ public class DownloadCommand implements Callable<Integer> {
 		logger.info("Files with missing data: {}", filesWithMissingData);
 		if (filesWithMissingData > 0) {
 			// Per-distro breakdown
-			Map<String, DownloadManager.DistroStats> distroStats = downloadManager.getDistroStats();
+			Map<String, ? extends DownloadManager.DistroStats> distroStats = downloadManager.getDistroStats();
 			if (!distroStats.isEmpty()) {
 				logger.info("Per-Distro Breakdown");
 				logger.info("====================");
@@ -294,13 +296,31 @@ public class DownloadCommand implements Callable<Integer> {
 		return ordered;
 	}
 
-	public static class DownloadProcessor implements DefaultDownloadManager.DownloadProcessor {
+	// -------------------------------------------------------------------------
+	// CommandDownloadManager
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Concrete {@link DefaultDownloadManager} for the download command. Implements
+	 * {@link #processDownload} with full download, checksum computation, and release-info
+	 * extraction logic.
+	 */
+	public static class CommandDownloadManager extends DefaultDownloadManager {
 		private final HttpUtils httpUtils;
 		private final Path metadataDir;
 		private final Path checksumDir;
 		private final boolean markMissing;
 
-		public DownloadProcessor(HttpUtils httpUtils, Path metadataDir, Path checksumDir, boolean markMissing) {
+		public CommandDownloadManager(
+				int threadCount,
+				int maxDownloadsPerHost,
+				int limitTotal,
+				Set<JdkMetadata.FileType> fileTypeFilter,
+				HttpUtils httpUtils,
+				Path metadataDir,
+				Path checksumDir,
+				boolean markMissing) {
+			super(threadCount, maxDownloadsPerHost, limitTotal, fileTypeFilter);
 			this.httpUtils = httpUtils;
 			this.metadataDir = metadataDir;
 			this.checksumDir = checksumDir;
@@ -308,7 +328,8 @@ public class DownloadCommand implements Callable<Integer> {
 		}
 
 		/** Process a single download task */
-		public void processDownload(DownloadTask task) throws IOException, InterruptedException {
+		@Override
+		protected void processDownload(DownloadTask task) throws IOException, InterruptedException {
 			JdkMetadata metadata = task.metadata();
 			String filename = metadata.getFilename();
 			String url = metadata.getUrl();
