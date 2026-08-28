@@ -11,7 +11,7 @@ import org.slf4j.Logger;
  * Dummy implementation of DownloadManager for testing. Does not actually download files, but
  * tracks submitted downloads for verification in tests.
  */
-public class DummyDownloadManager implements DownloadManager {
+public class DummyDownloadManager extends DownloadManager {
 	private final List<SubmittedDownload> submittedDownloads = new ArrayList<>();
 
 	/**
@@ -47,6 +47,14 @@ public class DummyDownloadManager implements DownloadManager {
 	@Override
 	public int getFailedCount() {
 		return 0;
+	}
+
+	/**
+	 * No-op: DummyDownloadManager never actually processes tasks.
+	 */
+	@Override
+	protected void processDownload(DownloadTask task) {
+		// No-op
 	}
 
 	/**

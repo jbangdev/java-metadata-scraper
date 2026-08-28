@@ -2,7 +2,6 @@ package dev.jbang.jdkdb;
 
 import dev.jbang.jdkdb.model.JdkMetadata;
 import dev.jbang.jdkdb.scraper.DefaultDownloadManager;
-import dev.jbang.jdkdb.scraper.DefaultDownloadManager.DownloadTask;
 import dev.jbang.jdkdb.scraper.DownloadManager;
 import dev.jbang.jdkdb.scraper.InterruptedProgressException;
 import dev.jbang.jdkdb.scraper.NoOpDownloadManager;
@@ -21,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -143,10 +143,10 @@ public class VerifyCommand implements Callable<Integer> {
 
 		// Create download manager
 		var threadCount = maxThreads > 0 ? maxThreads : Runtime.getRuntime().availableProcessors();
-		VerifyProcessor verifyProcessor = new VerifyProcessor(new HttpUtils(), metadataDir, markMissing);
 		DownloadManager downloadManager = statsOnly
 				? new NoOpDownloadManager(fileTypeFilter)
-				: new DefaultDownloadManager(threadCount, 3, limitTotal, fileTypeFilter, verifyProcessor);
+				: new VerifyDownloadManager(
+						threadCount, 3, limitTotal, fileTypeFilter, new HttpUtils(), metadataDir, markMissing);
 		downloadManager.start();
 		if (fileTypeFilter != null) {
 			logger.info("File type filter enabled: {}", fileTypeFilter);
@@ -223,7 +223,7 @@ public class VerifyCommand implements Callable<Integer> {
 		logger.info("Items pending verification (no last_verified): {}", filesWithMissingData);
 		if (filesWithMissingData > 0) {
 			// Per-distro breakdown
-			Map<String, DownloadManager.DistroStats> distroStats = downloadManager.getDistroStats();
+			Map<String, ? extends DownloadManager.DistroStats> distroStats = downloadManager.getDistroStats();
 			if (!distroStats.isEmpty()) {
 				logger.info("Per-Distro Breakdown");
 				logger.info("====================");
@@ -232,11 +232,15 @@ public class VerifyCommand implements Callable<Integer> {
 						.forEach(entry -> {
 							DownloadManager.DistroStats stats = entry.getValue();
 							logger.info("  {}:", stats.distro());
-							logger.info("    Submitted:  {}", stats.submitted());
-							logger.info("    Completed:  {}", stats.completed());
-							logger.info("    Failed:     {}", stats.failed());
+							logger.info("    Submitted:        {}", stats.submitted());
+							logger.info("    Completed:        {}", stats.completed());
+							logger.info("    Failed:           {}", stats.failed());
 							if (stats.pending() > 0) {
-								logger.info("    Pending:    {}", stats.pending());
+								logger.info("    Pending:          {}", stats.pending());
+							}
+							if (stats instanceof VerifyDistroStats vs) {
+								logger.info("    Verified:         {}", vs.verifiedCount());
+								logger.info("    Marked missing:   {}", vs.markedMissingCount());
 							}
 						});
 			}
@@ -244,9 +248,9 @@ public class VerifyCommand implements Callable<Integer> {
 			logger.info("");
 			logger.info("Total downloads completed: {}", totalCompleted);
 			logger.info("Total downloads failed: {}", totalFailed);
-			if (!statsOnly) {
-				logger.info("Items marked last_verified: {}", verifyProcessor.getVerifiedCount());
-				logger.info("Items marked missing_since: {}", verifyProcessor.getMarkedMissingCount());
+			if (downloadManager instanceof VerifyDownloadManager vm) {
+				logger.info("Items marked last_verified: {}", vm.getTotalVerifiedCount());
+				logger.info("Items marked missing_since: {}", vm.getTotalMarkedMissingCount());
 			}
 		}
 
@@ -281,29 +285,84 @@ public class VerifyCommand implements Callable<Integer> {
 		return unlistedSince != null && !unlistedSince.isBlank();
 	}
 
-	public static class VerifyProcessor implements DefaultDownloadManager.DownloadProcessor {
+	// -------------------------------------------------------------------------
+	// VerifyDistroStats
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Extended per-distro stats produced by {@link VerifyDownloadManager}. Carries
+	 * verification-specific fields on top of the base counts.
+	 */
+	public static class VerifyDistroStats extends DownloadManager.DistroStats {
+		private final int verifiedCount;
+		private final int markedMissingCount;
+
+		public VerifyDistroStats(
+				String distro, int submitted, int completed, int failed, int verifiedCount, int markedMissingCount) {
+			super(distro, submitted, completed, failed);
+			this.verifiedCount = verifiedCount;
+			this.markedMissingCount = markedMissingCount;
+		}
+
+		/** Number of items successfully verified (HTTP 2xx) for this distro. */
+		public int verifiedCount() {
+			return verifiedCount;
+		}
+
+		/** Number of items marked as missing_since for this distro. */
+		public int markedMissingCount() {
+			return markedMissingCount;
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// VerifyDownloadManager
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Concrete {@link DefaultDownloadManager} for the verify command. Implements
+	 * {@link #processDownload} with URL-check logic and overrides
+	 * {@link #createDistroStats} to return {@link VerifyDistroStats}.
+	 */
+	public static class VerifyDownloadManager extends DefaultDownloadManager {
 		private final HttpUtils httpUtils;
 		private final Path metadataDir;
 		private final boolean markMissing;
-		private final AtomicInteger verifiedCount = new AtomicInteger(0);
-		private final AtomicInteger markedMissingCount = new AtomicInteger(0);
 
-		public VerifyProcessor(HttpUtils httpUtils, Path metadataDir, boolean markMissing) {
+		// Per-distro tracking
+		private final ConcurrentHashMap<String, AtomicInteger> verifiedPerDistro = new ConcurrentHashMap<>();
+		private final ConcurrentHashMap<String, AtomicInteger> markedMissingPerDistro = new ConcurrentHashMap<>();
+
+		public VerifyDownloadManager(
+				int threadCount,
+				int maxDownloadsPerHost,
+				int limitTotal,
+				Set<JdkMetadata.FileType> fileTypeFilter,
+				HttpUtils httpUtils,
+				Path metadataDir,
+				boolean markMissing) {
+			super(threadCount, maxDownloadsPerHost, limitTotal, fileTypeFilter);
 			this.httpUtils = httpUtils;
 			this.metadataDir = metadataDir;
 			this.markMissing = markMissing;
 		}
 
-		public int getVerifiedCount() {
-			return verifiedCount.get();
+		/** Total verified count across all distros. */
+		public int getTotalVerifiedCount() {
+			return verifiedPerDistro.values().stream()
+					.mapToInt(AtomicInteger::get)
+					.sum();
 		}
 
-		public int getMarkedMissingCount() {
-			return markedMissingCount.get();
+		/** Total marked-missing count across all distros. */
+		public int getTotalMarkedMissingCount() {
+			return markedMissingPerDistro.values().stream()
+					.mapToInt(AtomicInteger::get)
+					.sum();
 		}
 
-		/** Process a single download task */
-		public void processDownload(DownloadTask task) throws IOException, InterruptedException {
+		@Override
+		protected void processDownload(DownloadTask task) throws IOException, InterruptedException {
 			JdkMetadata metadata = task.metadata();
 			String filename = metadata.getFilename();
 			String url = metadata.getUrl();
@@ -334,7 +393,11 @@ public class VerifyCommand implements Callable<Integer> {
 				}
 				metadata.setLastVerified(today);
 				saveMetadata(task, metadataDir, metadata);
-				verifiedCount.incrementAndGet();
+
+				verifiedPerDistro
+						.computeIfAbsent(task.distro(), k -> new AtomicInteger(0))
+						.incrementAndGet();
+
 				// Report success
 				task.downloadLogger().info("Verification successful for {}", filename);
 			} else if (status == 403 || status == 404) {
@@ -350,11 +413,24 @@ public class VerifyCommand implements Callable<Integer> {
 					metadata.setMissingSince(today);
 					task.downloadLogger().warn("Marking {} as missing_since={}", filename, today);
 					saveMetadata(task, metadataDir, metadata);
-					markedMissingCount.incrementAndGet();
+
+					markedMissingPerDistro
+							.computeIfAbsent(task.distro(), k -> new AtomicInteger(0))
+							.incrementAndGet();
 				}
 			} else {
 				throw new IOException("Download failed with HTTP status: " + status);
 			}
+		}
+
+		@Override
+		protected DistroStats createDistroStats(String distro, int submitted, int completed, int failed) {
+			int verified =
+					verifiedPerDistro.getOrDefault(distro, new AtomicInteger(0)).get();
+			int markedMissing = markedMissingPerDistro
+					.getOrDefault(distro, new AtomicInteger(0))
+					.get();
+			return new VerifyDistroStats(distro, submitted, completed, failed, verified, markedMissing);
 		}
 
 		private static Path saveMetadata(DownloadTask task, Path metadataDir, JdkMetadata metadata) throws IOException {

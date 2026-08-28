@@ -13,7 +13,7 @@ import org.slf4j.LoggerFactory;
  * No-operation implementation of DownloadManager that skips all downloads. Useful for testing or
  * metadata-only scraping.
  */
-public class NoOpDownloadManager implements DownloadManager {
+public class NoOpDownloadManager extends DownloadManager {
 	private final AtomicInteger completedDownloads = new AtomicInteger(0);
 	private final Set<JdkMetadata.FileType> fileTypeFilter;
 	private final ConcurrentHashMap<String, AtomicInteger> submittedPerDistro = new ConcurrentHashMap<>();
@@ -136,6 +136,14 @@ public class NoOpDownloadManager implements DownloadManager {
 	 */
 	public int getQueuedCount() {
 		return 0;
+	}
+
+	/**
+	 * No-op: NoOpDownloadManager never actually processes tasks.
+	 */
+	@Override
+	protected void processDownload(DownloadTask task) {
+		// No-op
 	}
 
 	/**

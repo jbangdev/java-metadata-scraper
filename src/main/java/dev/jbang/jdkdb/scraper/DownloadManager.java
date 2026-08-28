@@ -1,15 +1,17 @@
 package dev.jbang.jdkdb.scraper;
 
 import dev.jbang.jdkdb.model.JdkMetadata;
+import java.io.IOException;
 import java.util.Map;
 import org.slf4j.Logger;
 
 /**
- * Interface for managing parallel downloads of JDK files. Implementations
- * receive JdkMetadata from
- * scrapers and handle the downloading of files.
+ * Abstract base class for managing parallel downloads of JDK files. Implementations receive
+ * JdkMetadata from scrapers and handle the downloading of files. Subclasses implement
+ * {@link #processDownload(DownloadTask)} to supply the actual per-task processing logic and may
+ * override {@link #createDistroStats} to return extended per-distro statistics.
  */
-public interface DownloadManager {
+public abstract class DownloadManager {
 	/**
 	 * Submit a metadata item for download.
 	 *
@@ -17,53 +19,91 @@ public interface DownloadManager {
 	 * @param distro   The distro name
 	 * @param logger   The logger to use for logging download progress and errors
 	 */
-	void submit(JdkMetadata metadata, String distro, Logger logger);
+	public abstract void submit(JdkMetadata metadata, String distro, Logger logger);
 
 	/**
 	 * Start the download manager. Should be called once after construction.
 	 */
-	void start();
+	public abstract void start();
 
 	/**
-	 * Signal that no more downloads will be submitted. Call this after all scrapers
-	 * have finished.
+	 * Signal that no more downloads will be submitted. Call this after all scrapers have finished.
 	 */
-	void shutdown();
+	public abstract void shutdown();
 
 	/**
-	 * Wait for all queued downloads to complete. This method blocks until all
-	 * downloads are
+	 * Wait for all queued downloads to complete. This method blocks until all downloads are
 	 * finished.
 	 *
 	 * @throws InterruptedException if interrupted while waiting
 	 */
-	void awaitCompletion() throws InterruptedException;
+	public abstract void awaitCompletion() throws InterruptedException;
 
 	/**
 	 * Get the number of completed downloads.
 	 *
 	 * @return Number of successfully completed downloads
 	 */
-	int getCompletedCount();
+	public abstract int getCompletedCount();
 
 	/**
 	 * Get the number of failed downloads.
 	 *
 	 * @return Number of failed downloads
 	 */
-	int getFailedCount();
+	public abstract int getFailedCount();
 
 	/**
-	 * Get per-distro download statistics.
+	 * Get per-distro download statistics. The returned values are at least {@link DistroStats};
+	 * concrete implementations may return a richer subtype.
 	 *
 	 * @return Map of distro name to statistics
 	 */
-	Map<String, DistroStats> getDistroStats();
+	public abstract Map<String, ? extends DistroStats> getDistroStats();
 
 	/**
-	 * Statistics for a single distro's downloads.
+	 * Process a single download task. Implementations perform the actual work (e.g., HTTP download,
+	 * checksum computation, URL verification).
+	 *
+	 * @param task The download task to process
+	 * @throws IOException          if an I/O error occurs
+	 * @throws InterruptedException if interrupted while processing
 	 */
-	public record DistroStats(String distro, int submitted, int completed, int failed) {
+	protected abstract void processDownload(DownloadTask task) throws IOException, InterruptedException;
+
+	// -------------------------------------------------------------------------
+	// Shared types
+	// -------------------------------------------------------------------------
+
+	/** Internal record representing a single download task. */
+	public record DownloadTask(JdkMetadata metadata, String distro, Logger downloadLogger) {}
+
+	/**
+	 * Statistics for a single distro's downloads. May be subclassed by concrete
+	 * {@link DownloadManager} implementations to carry additional fields.
+	 */
+	public static class DistroStats {
+		protected final String distro;
+		protected final int submitted;
+		protected final int completed;
+		protected final int failed;
+
+		public DistroStats(String distro, int submitted, int completed, int failed) {
+			this.distro = distro;
+			this.submitted = submitted;
+			this.completed = completed;
+			this.failed = failed;
+		}
+
+		/**
+		 * Get the distro name.
+		 *
+		 * @return The distro name
+		 */
+		public String distro() {
+			return distro;
+		}
+
 		/**
 		 * Get the number of downloads that were submitted.
 		 *
@@ -92,8 +132,7 @@ public interface DownloadManager {
 		}
 
 		/**
-		 * Get the number of downloads still pending (submitted but not completed or
-		 * failed).
+		 * Get the number of downloads still pending (submitted but not completed or failed).
 		 *
 		 * @return Number of pending downloads for this distro
 		 */

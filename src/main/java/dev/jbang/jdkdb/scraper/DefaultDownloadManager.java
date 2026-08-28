@@ -1,7 +1,6 @@
 package dev.jbang.jdkdb.scraper;
 
 import dev.jbang.jdkdb.model.JdkMetadata;
-import java.io.*;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
@@ -13,8 +12,12 @@ import org.slf4j.LoggerFactory;
 /**
  * Default implementation that manages parallel downloads of JDK files across multiple threads.
  * Receives JdkMetadata from scrapers, queues them, and downloads files in parallel worker threads.
+ *
+ * <p>Subclasses implement {@link #processDownload(DownloadTask)} to supply the actual per-task
+ * processing logic, and may override {@link #createDistroStats} to return extended per-distro
+ * statistics.
  */
-public class DefaultDownloadManager implements DownloadManager {
+public abstract class DefaultDownloadManager extends DownloadManager {
 	private final BlockingQueue<DownloadTask> downloadQueue;
 	private final ExecutorService executorService;
 	private final AtomicInteger activeDownloads;
@@ -24,18 +27,12 @@ public class DefaultDownloadManager implements DownloadManager {
 	private volatile boolean shutdownRequested;
 	private final int maxDownloadsPerHost;
 	private final int limitTotal;
-	private final DownloadProcessor downloadProcessor;
 	private final ConcurrentHashMap<String, AtomicInteger> activeDownloadsPerHost;
 	private final Set<JdkMetadata.FileType> fileTypeFilter;
 	private final ConcurrentHashMap<String, AtomicInteger> submittedPerDistro;
 	private final ConcurrentHashMap<String, AtomicInteger> completedPerDistro;
 	private final ConcurrentHashMap<String, AtomicInteger> failedPerDistro;
 	private static final Logger logger = LoggerFactory.getLogger(DefaultDownloadManager.class);
-
-	@FunctionalInterface
-	public static interface DownloadProcessor {
-		void processDownload(DownloadTask task) throws IOException, InterruptedException;
-	}
 
 	/**
 	 * Create a new DefaultDownloadManager.
@@ -44,14 +41,9 @@ public class DefaultDownloadManager implements DownloadManager {
 	 * @param maxDownloadsPerHost Maximum number of concurrent downloads per host (default: 3)
 	 * @param limitTotal Maximum number of total downloads to accept (-1 for unlimited)
 	 * @param fileTypeFilter Set of file types to accept (null to accept all)
-	 * @param downloadProcessor Download processor to handle the actual download logic
 	 */
-	public DefaultDownloadManager(
-			int threadCount,
-			int maxDownloadsPerHost,
-			int limitTotal,
-			Set<JdkMetadata.FileType> fileTypeFilter,
-			DownloadProcessor downloadProcessor) {
+	protected DefaultDownloadManager(
+			int threadCount, int maxDownloadsPerHost, int limitTotal, Set<JdkMetadata.FileType> fileTypeFilter) {
 		this.downloadQueue = new LinkedBlockingQueue<>();
 		this.executorService = Executors.newFixedThreadPool(threadCount);
 		this.activeDownloads = new AtomicInteger(0);
@@ -66,7 +58,6 @@ public class DefaultDownloadManager implements DownloadManager {
 		this.submittedPerDistro = new ConcurrentHashMap<>();
 		this.completedPerDistro = new ConcurrentHashMap<>();
 		this.failedPerDistro = new ConcurrentHashMap<>();
-		this.downloadProcessor = downloadProcessor;
 	}
 
 	/**
@@ -239,12 +230,17 @@ public class DefaultDownloadManager implements DownloadManager {
 
 	private void setupNewDownload(DownloadTask task) throws InterruptedException {
 		// Extract host from URL
-		String host = extractHost(task.metadata.getUrl());
+		String host = extractHost(task.metadata().getUrl());
 		if (host == null) {
 			// Invalid URL, log failure and skip
 			failedDownloads.incrementAndGet();
-			task.downloadLogger().error("Invalid URL for {}: {}", task.metadata.getFilename(), task.metadata.getUrl());
-			logger.debug("Failed download for {} [{}] - invalid URL", task.metadata.getFilename(), task.distro);
+			task.downloadLogger()
+					.error(
+							"Invalid URL for {}: {}",
+							task.metadata().getFilename(),
+							task.metadata().getUrl());
+			logger.debug(
+					"Failed download for {} [{}] - invalid URL", task.metadata().getFilename(), task.distro());
 			return;
 		}
 
@@ -262,19 +258,19 @@ public class DefaultDownloadManager implements DownloadManager {
 		// Host slot acquired, proceed with download
 		activeDownloads.incrementAndGet();
 		try {
-			downloadProcessor.processDownload(task);
+			processDownload(task);
 			completedDownloads.incrementAndGet();
 			completedPerDistro
-					.computeIfAbsent(task.distro, k -> new AtomicInteger(0))
+					.computeIfAbsent(task.distro(), k -> new AtomicInteger(0))
 					.incrementAndGet();
-			logger.debug("Succeeded download for {} [{}]", task.metadata.getFilename(), task.distro);
+			logger.debug("Succeeded download for {} [{}]", task.metadata().getFilename(), task.distro());
 		} catch (Throwable t) {
 			failedDownloads.incrementAndGet();
 			failedPerDistro
-					.computeIfAbsent(task.distro, k -> new AtomicInteger(0))
+					.computeIfAbsent(task.distro(), k -> new AtomicInteger(0))
 					.incrementAndGet();
-			task.downloadLogger().error("Failed to download {}", task.metadata.getFilename(), t);
-			logger.debug("Failed download for {} [{}]", task.metadata.getFilename(), task.distro);
+			task.downloadLogger().error("Failed to download {}", task.metadata().getFilename(), t);
+			logger.debug("Failed download for {} [{}]", task.metadata().getFilename(), task.distro());
 		} finally {
 			activeDownloads.decrementAndGet();
 			// Decrement host counter
@@ -318,12 +314,26 @@ public class DefaultDownloadManager implements DownloadManager {
 	}
 
 	/**
+	 * Create a {@link DistroStats} instance for the given distro. Subclasses may override this to
+	 * return an extended stats type that carries additional fields.
+	 *
+	 * @param distro    The distro name
+	 * @param submitted Number of submitted downloads
+	 * @param completed Number of completed downloads
+	 * @param failed    Number of failed downloads
+	 * @return A {@link DistroStats} instance (or subclass) for the distro
+	 */
+	protected DistroStats createDistroStats(String distro, int submitted, int completed, int failed) {
+		return new DistroStats(distro, submitted, completed, failed);
+	}
+
+	/**
 	 * Get per-distro download statistics.
 	 *
 	 * @return Map of distro name to statistics
 	 */
 	@Override
-	public Map<String, DistroStats> getDistroStats() {
+	public Map<String, ? extends DistroStats> getDistroStats() {
 		Map<String, DistroStats> stats = new HashMap<>();
 		// Get all distro names from any of the maps
 		Set<String> allDistros = new HashSet<>();
@@ -340,11 +350,8 @@ public class DefaultDownloadManager implements DownloadManager {
 					.get();
 			int failed =
 					failedPerDistro.getOrDefault(distro, new AtomicInteger(0)).get();
-			stats.put(distro, new DistroStats(distro, submitted, completed, failed));
+			stats.put(distro, createDistroStats(distro, submitted, completed, failed));
 		}
 		return stats;
 	}
-
-	/** Internal class representing a download task */
-	public static record DownloadTask(JdkMetadata metadata, String distro, Logger downloadLogger) {}
 }
